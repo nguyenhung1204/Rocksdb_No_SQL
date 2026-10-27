@@ -16,7 +16,8 @@ from flask import Blueprint, Response, current_app, g, jsonify, render_template,
 from logstore import LEVELS, LogStore
 from logstore.demo import seed_demo as seed_demo_data
 from logstore.gen import generate
-from logstore.store import AUDIT_SOURCE, IdempotencyConflict, is_internal_audit_event
+from logstore.store import (AUDIT_SOURCE, MAX_KEY_FIELD_LENGTH, MAX_TS_MS, IdempotencyConflict,
+                            is_internal_audit_event)
 from .auth import current_user, login_required, roles_required
 from .maintenance import prune_checkpoints
 
@@ -25,6 +26,7 @@ api_bp = Blueprint("api", __name__)
 MAX_IMPORT_EVENTS = 100_000
 MAX_EXPORT_EVENTS = 1_000_000
 MAX_RETENTION_HOURS = 24 * 3650
+MAX_FUTURE_SKEW_MS = 24 * 3_600_000  # chap nhan dong ho nguon lech toi da 1 ngay
 BACKUP_NAME_RE = re.compile(r"^backup-[0-9]{8}-[0-9]{6}-[0-9a-f]{8}$")
 
 
@@ -52,9 +54,11 @@ def _query_integer(name, default=None):
 def _event_time(value, line=None):
     if value is None:
         return None
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > 0xFFFFFFFFFFFFFFFF:
-        where = " tai dong %d" % line if line else ""
+    where = " tai dong %d" % line if line else ""
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > MAX_TS_MS:
         raise ValueError("ts%s phai la so nguyen milliseconds khong am" % where)
+    if value > int(time.time() * 1000) + MAX_FUTURE_SKEW_MS:
+        raise ValueError("ts%s khong duoc vuot qua hien tai hon 24 gio" % where)
     return value
 
 
@@ -121,8 +125,8 @@ def events():
             raise ValueError("last_minutes phai lon hon 0 va khong qua 10 nam")
         end = int(time.time() * 1000)
         start = end - last_minutes * 60_000
-    if (start is not None and start < 0) or (end is not None and end < 0):
-        raise ValueError("start va end khong duoc am")
+    if any(value is not None and not 0 <= value <= MAX_TS_MS for value in (start, end)):
+        raise ValueError("start va end phai trong khoang 0-%d" % MAX_TS_MS)
     if start is not None and end is not None and end < start:
         raise ValueError("end phai lon hon hoac bang start")
     level = request.args.get("level") or None
@@ -134,8 +138,9 @@ def events():
     if limit < 0 or limit > 1000:
         raise ValueError("limit phai trong khoang 0-1000")
     source, trace_id, contains = (request.args.get(key) or None for key in ("source", "trace_id", "q"))
-    if any(value and len(value) > 256 for value in (source, trace_id)):
-        raise ValueError("source va trace_id toi da 256 ky tu")
+    if any(value and len(value) > MAX_KEY_FIELD_LENGTH for value in (source, trace_id)):
+        raise ValueError("source va trace_id toi da %d ky tu" % MAX_KEY_FIELD_LENGTH)
+    exclude_audit = request.args.get("hide_audit") in {"1", "true"}
     if contains and len(contains) > 500:
         raise ValueError("q toi da 500 ky tu")
     started = time.perf_counter()
@@ -143,7 +148,7 @@ def events():
     cursor = _event_key(cursor_value) if cursor_value else None
     rows = store.query(start_ms=start, end_ms=end, level=level, source=source,
                        trace_id=trace_id, contains=contains, limit=limit + (1 if limit else 0),
-                       before_id=cursor)
+                       before_id=cursor, exclude_audit=exclude_audit)
     has_more = bool(limit and len(rows) > limit)
     if has_more:
         rows = rows[:limit]
@@ -169,6 +174,7 @@ def ingest():
             producer_id = "legacy"
     if producer_id is None:
         return jsonify({"error": "token ingest khong hop le hoac chua duoc cau hinh"}), 401
+    g.audit_actor = "ingest:%s" % producer_id
     body = request.get_json(silent=True)
     if body is None:
         raise ValueError("body phai la JSON")

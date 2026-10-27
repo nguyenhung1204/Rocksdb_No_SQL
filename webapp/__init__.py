@@ -8,11 +8,15 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from flask import Flask, g, jsonify, request, session
-from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
 from logstore import LogStore
 from .maintenance import retention_settings
 from .login_throttle import LoginThrottle
+
+
+# Setup/login ghi audit qua g.audit_event de khong ghi nham redirect hoac lan that bai.
+EXPLICIT_AUDIT_ENDPOINTS = {"auth.setup", "auth.login"}
 
 
 class StoreLifecycleLock:
@@ -210,16 +214,21 @@ def create_app(db_path=None, backup_path=None, secret_key=None):
             "api.restore_backup": "backup.restore",
             "api.ingest": "event.ingest",
         }
-        action = action_by_endpoint.get(request.endpoint) if request.method in {"POST", "PUT", "PATCH", "DELETE"} else None
-        if action and 200 <= response.status_code < 400:
-            try:
-                target = next(iter((request.view_args or {}).values()), None)
-                app.extensions["logstore"].put_audit(
-                    session.get("username") or getattr(g, "audit_actor", None) or "ingest-service",
-                    action, target, response.status_code,
-                )
-            except Exception:
-                app.logger.exception("Could not write audit event for %s", action)
+        explicit = getattr(g, "audit_event", None)
+        if explicit is not None:
+            # View tu quyet dinh: chi ghi khi thao tac that su xay ra (setup/login).
+            action, actor, target, status = explicit
+        else:
+            action = action_by_endpoint.get(request.endpoint) if request.method in {"POST", "PUT", "PATCH", "DELETE"} else None
+            if request.endpoint in EXPLICIT_AUDIT_ENDPOINTS or not action or not 200 <= response.status_code < 400:
+                return response
+            actor = getattr(g, "audit_actor", None) or session.get("username") or "anonymous"
+            target = next(iter((request.view_args or {}).values()), None)
+            status = response.status_code
+        try:
+            app.extensions["logstore"].put_audit(actor, action, target, status)
+        except Exception:
+            app.logger.exception("Could not write audit event for %s", action)
         return response
 
     @app.teardown_request
@@ -245,6 +254,15 @@ def create_app(db_path=None, backup_path=None, secret_key=None):
     @app.errorhandler(RequestEntityTooLarge)
     def request_too_large(_error):
         return jsonify({"error": "Yeu cau vuot qua gioi han 10 MB"}), 413
+
+    @app.errorhandler(Exception)
+    def unexpected_error(error):
+        if isinstance(error, HTTPException):
+            return error
+        app.logger.exception("Unhandled error on %s %s", request.method, request.path)
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "loi he thong; xem log ung dung"}), 500
+        return "Loi he thong", 500
 
     @app.errorhandler(404)
     def not_found(_error):

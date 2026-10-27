@@ -44,7 +44,7 @@
       if (firstPage) rows.replaceChildren();
       for (const item of page.events) {
         const tr = document.createElement('tr');
-        const date = new Date(item.ts).toLocaleString();
+        const date = new Date(item.ts).toLocaleString('vi-VN');
         tr.append(cell(date), cell(item.actor), cell(item.action), cell(item.target), cell(item.status));
         rows.append(tr);
       }

@@ -145,6 +145,44 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(written, 1)
         self.assertNotEqual(replacement, slow_ids)
 
+    def test_fast_purge_keeps_ingest_mapping_of_newer_events(self):
+        self.s.put_ingested_many([("INFO", "agent", "old", {}, T0)], "agent-a", ["old"])
+        newer_ids, _ = self.s.put_ingested_many([("INFO", "agent", "new", {}, T0 + 100)], "agent-a", ["new"])
+        self.assertEqual(self.s.purge_older_than(T0 + 50), 1)
+        replay, written = self.s.put_ingested_many([("INFO", "agent", "new", {}, T0 + 100)], "agent-a", ["new"])
+        self.assertEqual((replay, written), (newer_ids, 0))
+
+    def test_timestamp_bounds_keep_every_event_queryable(self):
+        from logstore.store import MAX_TS_MS
+        for ts in (-1, MAX_TS_MS + 1, 2 ** 64 - 1, True):
+            with self.assertRaises(ValueError):
+                self.s.put_event("INFO", "a", "m", ts_ms=ts)
+        last = self.s.put_event("INFO", "a", "edge", ts_ms=MAX_TS_MS)
+        self.s.put_event("INFO", "a", "start", ts_ms=0)
+        self.assertEqual([e["id"] for e in self.s.query(limit=1)], [last.hex()])
+        self.assertEqual(len(self.s.query(limit=10)), self.s.count())
+        self.assertEqual(self.s.count(0, MAX_TS_MS), 2)
+        self.assertEqual(self.s.query(start_ms=MAX_TS_MS + 5), [])
+
+    def test_source_and_trace_length_are_bounded(self):
+        with self.assertRaises(ValueError):
+            self.s.put_event("INFO", "s" * 257, "m")
+        with self.assertRaises(ValueError):
+            self.s.put_event("INFO", "a", "m", {"trace_id": "t" * 257})
+
+    def test_late_sequence_cache_is_bounded_and_ids_stay_unique(self):
+        from logstore import store as store_module
+        self.s.put_event("INFO", "a", "now", ts_ms=T0 + 1_000_000)
+        with patch.object(store_module, "MAX_LATE_SEQUENCE_CACHE", 5):
+            for i in range(20):
+                self.s.put_many([("INFO", "a", "late", {}, T0 + i)] * 3)
+                self.assertLessEqual(len(self.s._late_sequences), 6)
+            # T0 da roi khoi cache: phai do lai DB va khong de ID cu.
+            self.s.put_many([("INFO", "a", "late-again", {}, T0)] * 3)
+            ids = [e["id"] for e in self.s.query(end_ms=T0 + 100, limit=100)]
+        self.assertEqual(len(ids), 63)
+        self.assertEqual(len(set(ids)), 63)
+
     def test_get_missing(self):
         self.assertIsNone(self.s.get(b"\x00" * 12))
 

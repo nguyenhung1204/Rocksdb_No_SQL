@@ -57,16 +57,23 @@
       <label>Trace ID<input id="queryTrace" maxlength="256" placeholder="trace-001"></label>
       <label>Từ khóa trong nội dung<input id="queryText" maxlength="500" placeholder="timeout"></label>
       <label>Số kết quả<input id="queryLimit" type="number" value="50" min="1" max="1000" style="width:100px"></label>
-      <button type="submit">Tìm kiếm</button>
+      <label class="check"><input id="hideAudit" type="checkbox" checked>Ẩn nhật ký kiểm toán</label>
+      <button type="submit" id="searchButton">Tìm kiếm</button>
     </form>
     <div id="queryStatus" class="status" role="status"></div>
+    <p class="muted">Khi nhập Trace ID, hệ thống tìm toàn bộ thời gian của trace đó. Bấm Trace ID trong bảng để xem cả luồng.</p>
     <div class="row"><button type="button" class="secondary" id="previousPage" disabled>Trang trước</button><button type="button" class="secondary" id="nextPage" disabled>Trang tiếp</button></div>
     <div class="table-wrap"><table>
-      <thead><tr><th>Thời gian</th><th>Mức</th><th>Nguồn</th><th>Trace ID</th><th>Nội dung</th>{% if user.role in ['admin', 'operator'] %}<th>Thao tác</th>{% endif %}</tr></thead>
+      <thead><tr><th>Thời gian</th><th>Mức</th><th>Nguồn</th><th>Trace ID</th><th>Nội dung</th><th>Thao tác</th></tr></thead>
       <tbody id="events"></tbody>
     </table></div>
   </section>
 </main>
+<dialog id="detailDialog">
+  <h2>Chi tiết sự kiện</h2>
+  <dl id="detailBody" class="detail"></dl>
+  <div class="row"><button class="secondary" type="button" id="detailTrace">Xem cả trace</button><button class="secondary" type="button" id="closeDetail">Đóng</button></div>
+</dialog>
 {% if user.role in ['admin', 'operator'] %}
 <dialog id="editDialog">
   <h2>Sửa sự kiện</h2>
@@ -99,10 +106,17 @@ async function api(path, options={}) {
   if (options.body && !(options.body instanceof FormData)) headers['Content-Type'] = 'application/json';
   const response = await fetch(path, {...options, headers});
   if (response.status === 401) { location.href = '/login'; throw new Error('Phiên đăng nhập đã hết hạn'); }
-  const body = await response.json();
+  let body;
+  try { body = await response.json(); }
+  catch (_error) { throw new Error('Máy chủ trả về phản hồi không hợp lệ (HTTP ' + response.status + ')'); }
   if (!response.ok) throw new Error(body.error || ('HTTP ' + response.status));
   return body;
 }
+function setStatus(id, message, kind) {
+  const element=$(id); element.textContent=message; element.className='status'+(kind?' '+kind:'');
+}
+const isAudit = event => event.source==='audit-service' && (event.fields||{})._audit===true;
+let lastEvents=[];
 async function loadStats() {
   const result = await api('/api/stats');
   const totals = [['Tổng sự kiện',result.total_events],['Dung lượng RocksDB',fmtBytes(result.disk_bytes)],
@@ -119,23 +133,53 @@ async function loadStats() {
 async function runQuery(reset=false) {
   if (reset) { pageCursors=[null]; pageIndex=0; }
   const params=new URLSearchParams();
-  if ($('lastMinutes').value) params.set('last_minutes',$('lastMinutes').value);
+  const trace=$('queryTrace').value.trim();
+  // Trace la mot luong nghiep vu tron ven: khong cat theo khoang thoi gian mac dinh.
+  if ($('lastMinutes').value && !trace) params.set('last_minutes',$('lastMinutes').value);
   if ($('queryLevel').value) params.set('level',$('queryLevel').value);
   if ($('querySource').value) params.set('source',$('querySource').value);
-  if ($('queryTrace').value) params.set('trace_id',$('queryTrace').value.trim());
+  if (trace) params.set('trace_id',trace);
   if ($('queryText').value) params.set('q',$('queryText').value.trim());
+  if ($('hideAudit').checked) params.set('hide_audit','1');
   params.set('limit',$('queryLimit').value||'50');
   if (pageCursors[pageIndex]) params.set('cursor',pageCursors[pageIndex]);
+  $('searchButton').disabled=true; setStatus('queryStatus','Đang tìm…');
   try {
     const result=await api('/api/events?'+params.toString());
-    nextPageCursor=result.next_cursor;
-    $('queryStatus').textContent=result.count+' kết quả · '+result.took_ms+' ms'+(result.has_more?' · còn trang sau':'');
+    nextPageCursor=result.next_cursor; lastEvents=result.events;
+    setStatus('queryStatus',result.count+' kết quả · '+result.took_ms+' ms'+(trace?' · toàn bộ thời gian của trace':'')+(result.has_more?' · còn trang sau':''));
     $('previousPage').disabled=pageIndex===0;
     $('nextPage').disabled=!result.has_more;
-    $('events').innerHTML=result.events.map(event=>'<tr><td class="ts">'+esc(fmtTime(event.ts))+'</td><td><span class="level '+esc(event.level)+'">'+esc(event.level)+'</span></td><td>'+esc(event.source)+'</td><td>'+esc((event.fields||{}).trace_id||'')+'</td><td>'+esc(event.msg)+'</td>'+
-      (canWrite?'<td class="actions"><button class="secondary" data-edit="'+event.id+'">Sửa</button><button class="danger" data-delete="'+event.id+'">Xóa</button></td>':'')+'</tr>').join('');
-  } catch(error) { $('queryStatus').textContent=error.message; }
+    if (!result.events.length) {
+      $('events').innerHTML='<tr><td colspan="6" class="empty">Không có sự kiện phù hợp. Thử chọn "Tất cả" ở khoảng thời gian hoặc bỏ bớt bộ lọc.</td></tr>';
+      return;
+    }
+    $('events').innerHTML=result.events.map((event,index)=>{
+      const trace=(event.fields||{}).trace_id||'';
+      const actions='<button class="secondary" data-detail="'+index+'">Chi tiết</button>'+
+        (canWrite&&!isAudit(event)?'<button class="secondary" data-edit="'+event.id+'">Sửa</button><button class="danger" data-delete="'+event.id+'">Xóa</button>':'');
+      return '<tr><td class="ts">'+esc(fmtTime(event.ts))+'</td><td><span class="level '+esc(event.level)+'">'+esc(event.level)+'</span></td><td>'+esc(event.source)+'</td><td>'+
+        (trace?'<button type="button" class="link" title="'+esc(trace)+'" data-trace="'+esc(trace)+'">'+esc(trace)+'</button>':'')+'</td><td>'+esc(event.msg)+'</td><td class="actions">'+actions+'</td></tr>';
+    }).join('');
+  } catch(error) { setStatus('queryStatus',error.message,'error'); }
+  finally { $('searchButton').disabled=false; }
 }
+function showTrace(trace){ $('queryTrace').value=trace; if($('detailDialog').open)$('detailDialog').close(); runQuery(true); }
+function showDetail(event){
+  const rows=[['ID',event.id],['Thời gian',fmtTime(event.ts)+' ('+event.ts+' ms)'],['Mức',event.level],['Nguồn',event.source],['Nội dung',event.msg]];
+  $('detailBody').innerHTML=rows.map(row=>'<dt>'+row[0]+'</dt><dd>'+esc(row[1])+'</dd>').join('')+
+    '<dt>Fields</dt><dd><pre>'+esc(JSON.stringify(event.fields||{},null,2))+'</pre></dd>';
+  const trace=(event.fields||{}).trace_id;
+  $('detailTrace').hidden=!trace; $('detailTrace').dataset.trace=trace||'';
+  $('detailDialog').showModal();
+}
+$('events').addEventListener('click',event=>{
+  const button=event.target.closest('button'); if(!button)return;
+  if(button.dataset.trace)showTrace(button.dataset.trace);
+  if(button.dataset.detail!==undefined)showDetail(lastEvents[Number(button.dataset.detail)]);
+});
+$('detailTrace').addEventListener('click',()=>showTrace($('detailTrace').dataset.trace));
+$('closeDetail').addEventListener('click',()=>$('detailDialog').close());
 async function refresh(){await loadStats();await runQuery(true);}
 $('queryForm').addEventListener('submit',event=>{event.preventDefault();runQuery(true);});
 $('nextPage').addEventListener('click',()=>{if(nextPageCursor){pageCursors.push(nextPageCursor);pageIndex++;runQuery();}});
@@ -145,26 +189,26 @@ if(canWrite){
     event.preventDefault(); const fields=$('writeTrace').value.trim()?{trace_id:$('writeTrace').value.trim()}:{};
     try {
       const result=await api('/api/events',{method:'POST',body:JSON.stringify({level:$('writeLevel').value,source:$('writeSource').value.trim(),msg:$('writeMessage').value,fields:fields})});
-      $('writeStatus').textContent='Đã ghi sự kiện '+result.ids[0]; await refresh();
-    } catch(error){$('writeStatus').textContent=error.message;}
+      setStatus('writeStatus','Đã ghi sự kiện '+result.ids[0],'success'); await refresh();
+    } catch(error){setStatus('writeStatus',error.message,'error');}
   });
   $('simulateButton').addEventListener('click',async()=>{
-    try{const r=await api('/api/simulate',{method:'POST',body:JSON.stringify({n:Number($('simN').value),hours:1})});$('maintenanceStatus').textContent='Đã sinh '+r.written+' sự kiện mẫu';await refresh();}
-    catch(error){$('maintenanceStatus').textContent=error.message;}
+    try{const r=await api('/api/simulate',{method:'POST',body:JSON.stringify({n:Number($('simN').value),hours:1})});setStatus('maintenanceStatus','Đã sinh '+r.written+' sự kiện mẫu','success');await refresh();}
+    catch(error){setStatus('maintenanceStatus',error.message,'error');}
   });
   $('purgeButton').addEventListener('click',async()=>{
     const hours=Number($('purgeHours').value);
-    if(!Number.isFinite(hours)||hours<=0){$('maintenanceStatus').textContent='Số giờ phải lớn hơn 0';return;}
+    if(!Number.isFinite(hours)||hours<=0){setStatus('maintenanceStatus','Số giờ phải lớn hơn 0','error');return;}
     if(!confirm('Xóa các sự kiện cũ hơn '+hours+' giờ? Thao tác này không thể hoàn tác.'))return;
-    try{const r=await api('/api/purge',{method:'POST',body:JSON.stringify({older_than_hours:hours})});$('maintenanceStatus').textContent='Đã xóa '+r.deleted+' sự kiện';await refresh();}
-    catch(error){$('maintenanceStatus').textContent=error.message;}
+    try{const r=await api('/api/purge',{method:'POST',body:JSON.stringify({older_than_hours:hours})});setStatus('maintenanceStatus','Đã xóa '+r.deleted+' sự kiện','success');await refresh();}
+    catch(error){setStatus('maintenanceStatus',error.message,'error');}
   });
   $('exportButton').addEventListener('click',()=>{location.href='/api/export';});
   $('importButton').addEventListener('click',async()=>{
-    const file=$('importFile').files[0];if(!file){$('maintenanceStatus').textContent='Hãy chọn tệp JSONL trước';return;}
+    const file=$('importFile').files[0];if(!file){setStatus('maintenanceStatus','Hãy chọn tệp JSONL trước','error');return;}
     const form=new FormData();form.append('file',file);
-    try{const r=await api('/api/import',{method:'POST',body:form});$('maintenanceStatus').textContent='Đã nhập '+r.written+' sự kiện';$('importFile').value='';await refresh();}
-    catch(error){$('maintenanceStatus').textContent=error.message;}
+    try{const r=await api('/api/import',{method:'POST',body:form});setStatus('maintenanceStatus','Đã nhập '+r.written+' sự kiện','success');$('importFile').value='';await refresh();}
+    catch(error){setStatus('maintenanceStatus',error.message,'error');}
   });
   async function loadBackups(){
     const r=await api('/api/backups'),select=$('backupSelect'),selected=select.value;
@@ -172,26 +216,26 @@ if(canWrite){
     select.value=selected;
   }
   $('backupButton').addEventListener('click',async()=>{
-    try{const r=await api('/api/backup',{method:'POST'});$('maintenanceStatus').textContent='Đã tạo bản sao lưu '+r.name;await loadBackups();}
-    catch(error){$('maintenanceStatus').textContent=error.message;}
+    try{const r=await api('/api/backup',{method:'POST'});setStatus('maintenanceStatus','Đã tạo bản sao lưu '+r.name,'success');await loadBackups();}
+    catch(error){setStatus('maintenanceStatus',error.message,'error');}
   });
   {% if user.role == 'admin' %}
   $('restoreButton').addEventListener('click',async()=>{
-    const name=$('backupSelect').value;if(!name){$('maintenanceStatus').textContent='Hãy chọn bản sao lưu';return;}
+    const name=$('backupSelect').value;if(!name){setStatus('maintenanceStatus','Hãy chọn bản sao lưu','error');return;}
     if(!confirm('Khôi phục '+name+'? Dữ liệu hiện tại sẽ được thay bằng bản sao này.'))return;
-    try{const r=await api('/api/restore',{method:'POST',body:JSON.stringify({name:name})});$('maintenanceStatus').textContent='Đã chuyển sang bản sao lưu '+r.restored;await refresh();await loadBackups();}
-    catch(error){$('maintenanceStatus').textContent=error.message;}
+    try{const r=await api('/api/restore',{method:'POST',body:JSON.stringify({name:name})});setStatus('maintenanceStatus','Đã chuyển sang bản sao lưu '+r.restored,'success');await refresh();await loadBackups();}
+    catch(error){setStatus('maintenanceStatus',error.message,'error');}
   });
   {% endif %}
   $('events').addEventListener('click',async event=>{
     const editId=event.target.dataset.edit,deleteId=event.target.dataset.delete;
     if(editId){
       try{const r=await api('/api/events/'+editId);$('editId').value=r.id;$('editLevel').value=r.level;$('editSource').value=r.source;$('editMessage').value=r.msg;$('editFields').value=JSON.stringify(r.fields||{},null,2);$('editDialog').showModal();}
-      catch(error){$('queryStatus').textContent=error.message;}
+      catch(error){setStatus('queryStatus',error.message,'error');}
     }
     if(deleteId&&confirm('Xóa sự kiện này? Thao tác không thể hoàn tác.')){
       try{await api('/api/events/'+deleteId,{method:'DELETE'});await refresh();}
-      catch(error){$('queryStatus').textContent=error.message;}
+      catch(error){setStatus('queryStatus',error.message,'error');}
     }
   });
   $('editForm').addEventListener('submit',async event=>{
@@ -204,8 +248,8 @@ if(canWrite){
     }catch(error){$('editError').textContent=error.message;}
   });
   $('cancelEdit').addEventListener('click',()=>$('editDialog').close());
-  loadBackups().catch(error=>$('maintenanceStatus').textContent=error.message);
+  loadBackups().catch(error=>setStatus('maintenanceStatus',error.message,'error'));
 }
-refresh().catch(error=>$('queryStatus').textContent=error.message);
+refresh().catch(error=>setStatus('queryStatus',error.message,'error'));
 </script>
 {% endblock %}

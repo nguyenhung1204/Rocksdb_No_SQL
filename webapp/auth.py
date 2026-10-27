@@ -3,7 +3,7 @@
 import re
 from functools import wraps
 
-from flask import Blueprint, current_app, jsonify, make_response, redirect, render_template, request, session, url_for
+from flask import Blueprint, current_app, g, jsonify, make_response, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
@@ -122,6 +122,7 @@ def setup():
                 })
             session.clear()
             session["username"] = username
+            g.audit_event = ("admin.setup", username, None, 302)
             return redirect(url_for("auth.index"))
     return render_template("setup.html", error=error, csrf_token=session["_csrf"]), 400 if error else 200
 
@@ -148,10 +149,13 @@ def login():
         if not user or not user.get("enabled", True) or not check_password_hash(user["password_hash"], password):
             throttle.record_failure(username, client_address)
             error = "ten dang nhap hoac mat khau khong dung"
+            # So lan ghi bi gioi han boi LoginThrottle; lan bi chan (429) khong ghi them.
+            g.audit_event = ("session.login_failed", "anonymous", username[:64] or "(trong)", 401)
         else:
             throttle.clear_account(username)
             session.clear()
             session["username"] = username
+            g.audit_event = ("session.login", username, None, 302)
             return redirect(url_for("auth.index"))
     return render_template("login.html", error=error, csrf_token=session["_csrf"]), 401 if error else 200
 

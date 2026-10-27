@@ -27,6 +27,15 @@
     </table></div>
   </section>
 </main>
+<dialog id="passwordDialog">
+  <h2>Đặt lại mật khẩu</h2>
+  <form id="passwordForm">
+    <p class="muted">Tài khoản: <strong id="passwordUser"></strong></p>
+    <label>Mật khẩu mới (tối thiểu 10 ký tự)<input id="newPassword" type="password" minlength="10" required autocomplete="new-password"></label>
+    <p id="passwordError" class="error" role="alert"></p>
+    <div class="row"><button type="submit">Lưu mật khẩu</button><button class="secondary" type="button" id="cancelPassword">Đóng</button></div>
+  </form>
+</dialog>
 {% endblock %}
 {% block scripts %}
 <script>
@@ -36,7 +45,9 @@ async function api(path, options={}) {
   options.headers = {...(options.headers || {}), 'X-CSRF-Token':csrf};
   if (options.body && !(options.body instanceof FormData)) options.headers['Content-Type'] = 'application/json';
   const response = await fetch(path, options);
-  const body = await response.json();
+  let body;
+  try { body = await response.json(); }
+  catch (_error) { throw new Error('Máy chủ trả về phản hồi không hợp lệ (HTTP ' + response.status + ')'); }
   if (!response.ok) throw new Error(body.error || response.status);
   return body;
 }
@@ -46,10 +57,12 @@ async function loadUsers() {
     document.getElementById('users').innerHTML = result.users.map(user => `<tr>
       <td><strong>${esc(user.full_name || user.username)}</strong><br><span class="muted">${esc(user.department || 'Chưa khai báo phòng ban')}</span></td>
       <td>${esc(user.username)}<br><span class="muted">${esc(user.email || 'Chưa khai báo email')}</span></td>
-      <td>${esc(user.role)}</td><td>${user.enabled ? 'Đang hoạt động' : 'Đã khóa'}</td>
-      <td><button class="secondary" data-toggle="${esc(user.username)}" data-enabled="${user.enabled}">${user.enabled ? 'Khóa' : 'Mở khóa'}</button>
+      <td><select data-role="${esc(user.username)}" aria-label="Vai trò của ${esc(user.username)}">${['viewer','operator','admin'].map(role => `<option ${role === user.role ? 'selected' : ''}>${role}</option>`).join('')}</select></td>
+      <td>${user.enabled ? 'Đang hoạt động' : 'Đã khóa'}</td>
+      <td class="actions"><button class="secondary" data-toggle="${esc(user.username)}" data-enabled="${user.enabled}">${user.enabled ? 'Khóa' : 'Mở khóa'}</button>
+      <button class="secondary" data-password="${esc(user.username)}">Đặt lại mật khẩu</button>
       <button class="danger" data-delete="${esc(user.username)}">Xóa</button></td></tr>`).join('');
-  } catch (error) { document.getElementById('userStatus').textContent = error.message; }
+  } catch (error) { setUserStatus(error.message, 'error'); }
 }
 document.getElementById('demoSeedForm').addEventListener('submit', async event => {
   event.preventDefault();
@@ -65,7 +78,7 @@ document.getElementById('demoSeedForm').addEventListener('submit', async event =
       ? `Đã thêm ${result.users_created} tài khoản và ${result.events_written} sự kiện. Tài khoản mới dùng mật khẩu tạm bạn vừa nhập.`
       : 'Dữ liệu mẫu đã có; không tạo bản ghi trùng.';
     await loadUsers();
-  } catch (error) { status.textContent = error.message; }
+  } catch (error) { setUserStatus(error.message, 'error'); }
   finally { button.disabled = false; }
 });
 document.getElementById('userForm').addEventListener('submit', async event => {
@@ -85,18 +98,58 @@ document.getElementById('userForm').addEventListener('submit', async event => {
     })});
     status.textContent = `Đã tạo ${result.username}`;
     event.target.reset(); await loadUsers();
-  } catch (error) { status.textContent = error.message; }
+  } catch (error) { setUserStatus(error.message, 'error'); }
   finally { button.disabled = false; }
 });
+function setUserStatus(message, kind) {
+  const status = document.getElementById('userStatus');
+  status.textContent = message; status.className = 'status' + (kind ? ' ' + kind : '');
+}
 document.getElementById('users').addEventListener('click', async event => {
   const toggle = event.target.dataset.toggle;
   const remove = event.target.dataset.delete;
+  const password = event.target.dataset.password;
+  if (password) {
+    document.getElementById('passwordUser').textContent = password;
+    document.getElementById('passwordForm').reset();
+    document.getElementById('passwordError').textContent = '';
+    document.getElementById('passwordDialog').showModal();
+    return;
+  }
   try {
-    if (toggle) await api('/api/users/' + encodeURIComponent(toggle), {method:'PUT', body:JSON.stringify({enabled:event.target.dataset.enabled !== 'true'})});
-    if (remove && confirm(`Xóa tài khoản ${remove}?`)) await api('/api/users/' + encodeURIComponent(remove), {method:'DELETE'});
+    if (toggle) {
+      const lock = event.target.dataset.enabled === 'true';
+      if (lock && !confirm(`Khóa tài khoản ${toggle}? Người dùng này sẽ bị đăng xuất.`)) return;
+      await api('/api/users/' + encodeURIComponent(toggle), {method:'PUT', body:JSON.stringify({enabled:!lock})});
+      setUserStatus(`${lock ? 'Đã khóa' : 'Đã mở khóa'} ${toggle}`, 'success');
+    }
+    if (remove) {
+      if (!confirm(`Xóa tài khoản ${remove}?`)) return;
+      await api('/api/users/' + encodeURIComponent(remove), {method:'DELETE'});
+      setUserStatus(`Đã xóa ${remove}`, 'success');
+    }
     await loadUsers();
-  } catch (error) { document.getElementById('userStatus').textContent = error.message; }
+  } catch (error) { setUserStatus(error.message, 'error'); }
 });
+document.getElementById('users').addEventListener('change', async event => {
+  const username = event.target.dataset.role;
+  if (!username) return;
+  try {
+    const result = await api('/api/users/' + encodeURIComponent(username), {method:'PUT', body:JSON.stringify({role:event.target.value})});
+    setUserStatus(`Đã đổi vai trò ${result.username} thành ${result.role}`, 'success');
+  } catch (error) { setUserStatus(error.message, 'error'); }
+  await loadUsers();
+});
+document.getElementById('passwordForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const username = document.getElementById('passwordUser').textContent;
+  try {
+    await api('/api/users/' + encodeURIComponent(username), {method:'PUT', body:JSON.stringify({password:document.getElementById('newPassword').value})});
+    document.getElementById('passwordDialog').close();
+    setUserStatus(`Đã đặt lại mật khẩu cho ${username}`, 'success');
+  } catch (error) { document.getElementById('passwordError').textContent = error.message; }
+});
+document.getElementById('cancelPassword').addEventListener('click', () => document.getElementById('passwordDialog').close());
 loadUsers();
 </script>
 {% endblock %}

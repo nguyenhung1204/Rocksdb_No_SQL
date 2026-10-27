@@ -123,7 +123,7 @@ Thư mục `data/` chứa dữ liệu phát sinh khi chạy, không chứa mã n
 1. Tạo admin ở `/setup` rồi đăng nhập.
 2. Trong “Quản lý người dùng”, chọn mật khẩu tạm tối thiểu 10 ký tự và bấm “Nạp dữ liệu người dùng và nghiệp vụ mẫu”. Hệ thống thêm 4 nhân sự giả lập (operator/viewer) cùng 32 sự kiện thuộc 5 trace liên kết; có đơn hàng thành công, thanh toán thử lại, giao dịch bị từ chối, thao tác vận hành và checkpoint.
 3. Sinh thêm khoảng 5.000 log tổng hợp nếu cần; bảng thống kê hiển thị bản ghi, dung lượng và số key theo column family.
-4. Tra cứu `DEMO-ORDER-001` theo trace ID để thấy một đơn hàng đi qua nhiều dịch vụ; thử `DEMO-ORDER-003` để xem xử lý lỗi và hoàn kho.
+4. Tra cứu `DEMO-ORDER-001` theo trace ID để thấy một đơn hàng đi qua nhiều dịch vụ; thử `DEMO-ORDER-003` để xem xử lý lỗi và hoàn kho. Khi có Trace ID, giao diện tìm toàn bộ thời gian của trace (bỏ qua bộ lọc "1 giờ gần nhất"). Bấm Trace ID trong bảng hoặc nút **Chi tiết** để xem đầy đủ `fields` của sự kiện.
 5. Tra cứu theo thời gian, mức, nguồn hoặc từ khóa; tạo/sửa/xóa sự kiện thử.
 6. Vào “Quản lý người dùng”, xem hồ sơ/vai trò rồi đăng nhập bằng một tài khoản mẫu để kiểm tra quyền chỉ đọc hoặc thao tác.
 7. Xuất JSONL, nhập lại tệp đó, tạo checkpoint, thêm sự kiện rồi restore để xem trạng thái quay về snapshot. Nhập lại sẽ tạo sự kiện mới với ID mới; restore cũng khôi phục tài khoản/quyền về thời điểm checkpoint.
@@ -198,7 +198,7 @@ Xoay vòng backup cũng mặc định tắt (`LOGSTORE_BACKUP_RETENTION_COUNT=0`
 
 ## Nhật ký kiểm toán và giới hạn đăng nhập
 
-Trang `/audit` và API `GET /api/audit` chỉ dành cho admin. API nhận `limit` từ 1 đến 100 và `cursor` từ phản hồi trước đó; nó chỉ trả các audit event chuẩn, kể cả khi các event mẫu thông thường dùng cùng `audit-service` source. Phản hồi chỉ có thời điểm, actor, action, target và mã kết quả. Audit lưu trong cùng RocksDB nên restore checkpoint cũ có thể làm lùi nhật ký; đây không phải kho audit độc lập chống sửa đổi.
+Trang `/audit` và API `GET /api/audit` chỉ dành cho admin. API nhận `limit` từ 1 đến 100 và `cursor` từ phản hồi trước đó; nó chỉ trả các audit event chuẩn, kể cả khi các event mẫu thông thường dùng cùng `audit-service` source. Phản hồi chỉ có thời điểm, actor, action, target và mã kết quả. Audit chỉ ghi thao tác thực sự thành công; `/setup` sau khi đã có tài khoản không tạo bản ghi. Mỗi lần đăng nhập sai được ghi `session.login_failed` (actor `anonymous`, target là tên đăng nhập đã thử); các lần bị chặn 429 không ghi thêm để tránh làm phình DB. Ingest ghi actor `ingest:<producer>`. Bảng tra cứu trên dashboard mặc định ẩn audit (bỏ chọn "Ẩn nhật ký kiểm toán" hoặc dùng `hide_audit=0`). Audit lưu trong cùng RocksDB nên restore checkpoint cũ có thể làm lùi nhật ký; đây không phải kho audit độc lập chống sửa đổi.
 
 Đăng nhập bị giới hạn tạm thời sau 5 lần sai cho cùng tài khoản hoặc 25 lần sai từ cùng địa chỉ client trong cửa sổ 60 giây. Thời gian chờ là 60 giây và phản hồi HTTP 429 có `Retry-After`. Bộ đếm nằm trong bộ nhớ tiến trình, được giới hạn kích thước và tự hết hạn; khởi động lại app sẽ xóa bộ đếm. Đăng nhập thành công xóa trạng thái thất bại của tài khoản đó.
 
@@ -249,6 +249,8 @@ Kiểm thử được chia thành `tests/unit` cho lớp lưu trữ và `tests/i
 
 Event ID có 12 byte: timestamp mili giây big-endian (8 byte) và số thứ tự (4 byte). RocksDB sắp xếp key theo byte, vì vậy DB có thể quét sự kiện theo thời gian.
 
+Timestamp hợp lệ nằm trong khoảng 0 đến 253.402.300.799.999 ms (hết năm 9999); API web và ingest còn từ chối `ts` vượt quá hiện tại hơn 24 giờ để mọi sự kiện đều truy vấn và hết hạn được. `source` và `fields.trace_id` tối đa 256 ký tự vì chúng nằm trong key index.
+
 Nếu log đến muộn, hệ thống giữ timestamp của sự kiện và cấp sequence chưa dùng tại mili-giây đó. Vì vậy các key luôn được RocksDB sắp xếp theo thời điểm sự kiện, kể cả khi thứ tự ghi nhận khác thứ tự phát sinh.
 
 | Column family | Vai trò |
@@ -259,8 +261,9 @@ Nếu log đến muộn, hệ thống giữ timestamp của sự kiện và cấ
 | `idx_trace` | Index theo trace ID |
 | `meta` | Danh mục nguồn và bộ đếm tổng/số lượng theo mức độ |
 | `users` | Tài khoản, password hash, vai trò và trạng thái |
+| `idx_ingest` | Ánh xạ `producer + source_event_id` → event ID (và chiều ngược lại) để ingest retry không ghi trùng |
 
-Ghi, sửa, xóa sự kiện cập nhật bản ghi chính, index và bộ đếm trong một `WriteBatch`. Bộ đếm tổng/số lượng theo mức độ được nạp trực tiếp từ metadata; DB cũ tự tạo bộ đếm một lần khi mở lại. Retention quét ID trace theo iterator và xóa range theo từng nhóm, không giữ toàn bộ ID trace trong RAM. JSONL import xác thực toàn bộ vào tệp tạm rồi ghi bằng một `WriteBatch` nguyên tử; kích thước upload web được giới hạn 10 MB để chặn dữ liệu đầu vào quá lớn. Export duyệt một snapshot RocksDB bằng iterator dạng stream và dừng ở một triệu sự kiện. JSONL bỏ qua bản ghi audit hệ thống chuẩn từ `audit-service` để tệp có thể nhập lại mà không cho phép giả mạo audit; những sự kiện khác được giữ nguyên, kể cả bản ghi cũ có field `_audit` trùng tên. Checkpoint vẫn giữ toàn bộ audit. App lưu manifest đường dẫn để mở đúng DB sau khi chạy lại, trừ khi đường dẫn được cấu hình tường minh.
+Ghi, sửa, xóa sự kiện cập nhật bản ghi chính, index và bộ đếm trong một `WriteBatch`. Bộ đếm tổng/số lượng theo mức độ được nạp trực tiếp từ metadata; DB cũ tự tạo bộ đếm một lần khi mở lại. Retention quét ID trace theo iterator và xóa range theo từng nhóm; ánh xạ ingest của sự kiện hết hạn được tìm qua key ngược đã sắp theo thời gian, không giữ danh sách ID trong RAM. JSONL import xác thực toàn bộ vào tệp tạm rồi ghi bằng một `WriteBatch` nguyên tử; kích thước upload web được giới hạn 10 MB để chặn dữ liệu đầu vào quá lớn. Export duyệt một snapshot RocksDB bằng iterator dạng stream và dừng ở một triệu sự kiện. JSONL bỏ qua bản ghi audit hệ thống chuẩn từ `audit-service` để tệp có thể nhập lại mà không cho phép giả mạo audit; những sự kiện khác được giữ nguyên, kể cả bản ghi cũ có field `_audit` trùng tên. Checkpoint vẫn giữ toàn bộ audit. App lưu manifest đường dẫn để mở đúng DB sau khi chạy lại, trừ khi đường dẫn được cấu hình tường minh.
 
 ## Hạn chế cần nêu khi bảo vệ
 

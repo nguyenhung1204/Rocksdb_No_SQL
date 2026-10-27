@@ -57,6 +57,10 @@ ID_STRUCT = struct.Struct(">QI")  # 8 byte ts_ms + 4 byte seq
 ID_LEN = ID_STRUCT.size  # 12
 MIN_ID = ID_STRUCT.pack(0, 0)
 AUDIT_SOURCE = "audit-service"
+# 9999-12-31T23:59:59.999Z: moc tren cho timestamp de query/retention luon nhin thay su kien
+MAX_TS_MS = 253_402_300_799_999
+MAX_KEY_FIELD_LENGTH = 256  # source va trace_id nam trong key index
+MAX_LATE_SEQUENCE_CACHE = 10_000
 
 
 def is_internal_audit_event(event):
@@ -248,6 +252,8 @@ class LogStore:
             raise ValueError("level phai thuoc %s" % LEVELS)
         if not isinstance(source, str) or not source or "\x00" in source:
             raise ValueError("source khong duoc rong va khong chua ky tu NUL")
+        if len(source) > MAX_KEY_FIELD_LENGTH:
+            raise ValueError("source toi da %d ky tu" % MAX_KEY_FIELD_LENGTH)
         if not isinstance(msg, str):
             raise ValueError("msg phai la chuoi")
         if fields is not None and not isinstance(fields, dict):
@@ -255,6 +261,20 @@ class LogStore:
         trace_id = (fields or {}).get("trace_id")
         if trace_id is not None and (not isinstance(trace_id, str) or "\x00" in trace_id):
             raise ValueError("fields.trace_id phai la chuoi khong chua ky tu NUL")
+        if trace_id is not None and len(trace_id) > MAX_KEY_FIELD_LENGTH:
+            raise ValueError("fields.trace_id toi da %d ky tu" % MAX_KEY_FIELD_LENGTH)
+
+    @staticmethod
+    def _check_ts(ts_ms):
+        if (not isinstance(ts_ms, int) or isinstance(ts_ms, bool)
+                or not 0 <= ts_ms <= MAX_TS_MS):
+            raise ValueError("ts phai la so nguyen milliseconds trong khoang 0-%d" % MAX_TS_MS)
+
+    def _trim_late_sequences(self):
+        # Chi goi truoc khi cap ID cho mot batch moi: trong batch, cache phai giu
+        # nguyen vi cac ID chua duoc ghi xuong DB de do lai.
+        if len(self._late_sequences) > MAX_LATE_SEQUENCE_CACHE:
+            self._late_sequences.clear()
 
     def _add_to_batch(self, wb, event_id, level, source, msg, fields):
         value = json.dumps(
@@ -303,6 +323,8 @@ class LogStore:
                 raise ValueError("source_event_id phai la chuoi 1-512 ky tu")
             level, source, msg, fields, ts_ms = event
             self._check_event(level, source, msg, fields)
+            if ts_ms is not None:
+                self._check_ts(ts_ms)
             canonical = json.dumps(
                 {"level": level, "source": source, "msg": msg,
                  "fields": fields or {}, "ts": ts_ms},
@@ -317,6 +339,7 @@ class LogStore:
         new_events = {}
         reverse_entries = {}
         with self._lock:
+            self._trim_late_sequences()
             for index, (event, key, payload_hash) in enumerate(zip(events, keys, hashes)):
                 entry = new_entries.get(key)
                 if entry is not None and entry["hash"].encode("ascii") != payload_hash:
@@ -397,8 +420,11 @@ class LogStore:
         new_sources = set()
         level_deltas = dict.fromkeys(LEVELS, 0)
         with self._lock:
+            self._trim_late_sequences()
             for level, source, msg, fields, ts_ms in events:
                 self._check_event(level, source, msg, fields)
+                if ts_ms is not None:
+                    self._check_ts(ts_ms)
                 event = {"source": source, "fields": fields}
                 if is_internal_audit_event(event) and not allow_audit:
                     raise ValueError("_audit is reserved for system audit records")
@@ -482,7 +508,7 @@ class LogStore:
 
     def query(self, start_ms=None, end_ms=None, level=None, source=None,
               contains=None, limit=100, reverse=True, trace_id=None,
-              before_id=None, after_id=None):
+              before_id=None, after_id=None, exclude_audit=False):
         """
         Truy van su kien.
           start_ms, end_ms : khoang thoi gian [start, end] (ms), None = khong gioi han
@@ -492,6 +518,7 @@ class LogStore:
           contains         : loc chuoi con trong msg (loc sau, khong co index!)
           limit            : so ban ghi toi da
           reverse          : True = moi nhat truoc
+          exclude_audit    : True = bo qua ban ghi audit he thong
         """
         if limit < 0:
             raise ValueError("limit khong duoc am")
@@ -500,8 +527,9 @@ class LogStore:
         if before_id and after_id:
             raise ValueError("before_id va after_id khong the dung cung luc")
 
-        lo = make_id(max(start_ms, 0) if start_ms is not None else 0, 0)
-        hi = make_id((end_ms + 1) if end_ms is not None else 0xFFFFFFFFFFFFFFF, 0)
+        lo, hi = self._time_bounds(start_ms, end_ms)
+        if lo >= hi:
+            return []
         if before_id:
             hi = min(hi, self._validate_cursor(before_id))
         elif after_id:
@@ -542,10 +570,21 @@ class LogStore:
                 continue
             if contains and contains.lower() not in ev["msg"].lower():
                 continue
+            if exclude_audit and is_internal_audit_event(ev):
+                continue
             out.append(ev)
             if len(out) >= limit:
                 break
         return out
+
+    @staticmethod
+    def _time_bounds(start_ms, end_ms):
+        """Doi [start_ms, end_ms] thanh khoang key [lo, hi), kep vao [0, MAX_TS_MS]."""
+        start = 0 if start_ms is None else max(start_ms, 0)
+        end = MAX_TS_MS if end_ms is None else min(end_ms, MAX_TS_MS)
+        if start > end:
+            return MIN_ID, MIN_ID
+        return make_id(start, 0), make_id(end + 1, 0)
 
     @staticmethod
     def _validate_cursor(cursor):
@@ -660,8 +699,9 @@ class LogStore:
         """Dem su kien tong truc tiep; truy van theo khoang quet index."""
         if start_ms is None and end_ms is None:
             return self._event_counts[level_exact] if level_exact else self._total_events
-        lo = make_id(start_ms or 0, 0)
-        hi = make_id((end_ms + 1) if end_ms is not None else 0xFFFFFFFFFFFFFFF, 0)
+        lo, hi = self._time_bounds(start_ms, end_ms)
+        if lo >= hi:
+            return 0
         if level_exact:
             cf, prefix = self.cf_level, bytes([LEVEL_NUM[level_exact]])
             lo, hi = prefix + lo, prefix + hi
@@ -696,11 +736,9 @@ class LogStore:
             deleted_by_level = dict.fromkeys(LEVELS, 0)
             deleted = 0
             has_expired_audit = False
-            expired_ids = []
             it = self.db.iter()
             it.seek_to_first()
             while it.valid() and it.key() < cutoff:
-                expired_ids.append(it.key())
                 record = json.loads(it.value().decode("utf-8"))
                 if is_internal_audit_event(record):
                     has_expired_audit = True
@@ -724,8 +762,10 @@ class LogStore:
                 for src in self._known_sources:
                     p = src.encode("utf-8") + b"\x00"
                     wb.delete_range(p + MIN_ID, p + cutoff, self.h_source)
-                for event_id in expired_ids:
-                    self._delete_ingest_mapping(wb, event_id)
+                # Mapping nguoc "r\0" + event_id cung sap xep theo thoi gian: chi quet
+                # cac event da ingest trong khoang het han, khong giu moi ID trong RAM.
+                for reverse_key, _ in self._scan(self.cf_ingest, b"r\x00" + MIN_ID, b"r\x00" + cutoff):
+                    self._delete_ingest_mapping(wb, reverse_key[2:])
                 level_deltas = {level: -count for level, count in deleted_by_level.items() if count}
                 updated_total, updated_counts = self._count_delta_batch(wb, -deleted, level_deltas)
                 self.db.write(wb)

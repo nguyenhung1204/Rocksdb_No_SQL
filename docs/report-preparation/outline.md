@@ -27,7 +27,7 @@ Mỗi chương ghi người phụ trách chính. Viết bằng lời của nhóm
 - 3.1 Kiến trúc tổng thể (hình: ứng dụng → lớp `LogStore` → RocksDB → đĩa).
 - 3.2 Mô hình sự kiện (level, source, msg, fields) và vì sao chọn JSON cho value.
 - 3.3 **Thiết kế khóa** `event_id = timestamp(8B) + seq(4B)`, big-endian: lý do, xử lý trùng mili-giây, đồng hồ lùi, khởi động lại.
-- 3.4 Thiết kế 6 column family: `default`, `idx_level`, `idx_source`, `idx_trace`, `meta`, `users` (bảng + hình bố cục key).
+- 3.4 Thiết kế 7 column family: `default`, `idx_level`, `idx_source`, `idx_trace`, `meta`, `users`, `idx_ingest` (bảng + hình bố cục key).
 - 3.5 Thiết kế các thao tác: ghi nguyên tử (WriteBatch), truy vấn theo thời gian/mức/nguồn/trace, sửa/xóa đồng bộ chỉ mục, retention (DeleteRange), JSONL, backup/restore (Checkpoint).
 - 3.6 Thiết kế đăng nhập, phân quyền admin/operator/viewer, REST API và giao diện (TV2 viết phần này).
 - 3.7 Lựa chọn cấu hình (compression, bloom, memtable...) và lý do.
