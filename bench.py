@@ -9,6 +9,7 @@ Ket qua tuy may; hay chay nhieu lan va ghi lai may/phien ban khi dua vao bao cao
 """
 
 import argparse
+import ctypes
 import json
 import os
 import platform
@@ -91,6 +92,13 @@ class SqliteStore:
             "SELECT * FROM events WHERE source=? AND ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT ?",
             (src, lo, hi, limit)).fetchall()
 
+    def contains_query(self, keyword, limit=100):
+        """Literal, case-insensitive ASCII substring scan matching the benchmark query."""
+        return self.c.execute(
+            "SELECT * FROM events WHERE instr(lower(msg), lower(?)) > 0 ORDER BY ts DESC, id DESC LIMIT ?",
+            (keyword, limit),
+        ).fetchall()
+
     def purge(self, cutoff):
         self.c.execute("DELETE FROM events WHERE ts < ?", (cutoff,))
         self.c.commit()
@@ -121,6 +129,64 @@ def throughput_trials(events, work, repeats):
     return {name: throughput_summary(samples) for name, samples in rates.items()}
 
 
+def keyword_search_summary(rocks_query, sqlite_query, keyword="timeout", repeats=100, limit=100):
+    """Measure equivalent literal substring scans and report observed sample counts."""
+    if not isinstance(keyword, str) or not keyword:
+        raise ValueError("keyword must not be empty")
+    if repeats < 1 or limit < 1:
+        raise ValueError("repeats and limit must be positive")
+    samples = {"rocksdb": [], "sqlite": []}
+    returned = {}
+    for name, query in (("rocksdb", rocks_query), ("sqlite", sqlite_query)):
+        for _ in range(repeats):
+            started = time.perf_counter()
+            rows = query(keyword, limit)
+            samples[name].append((time.perf_counter() - started) * 1000)
+            returned[name] = len(rows)
+    return {
+        "keyword": keyword,
+        "limit": limit,
+        "rocksdb": {**latency_summary(samples["rocksdb"]), "returned_rows": returned["rocksdb"]},
+        "sqlite": {**latency_summary(samples["sqlite"]), "returned_rows": returned["sqlite"]},
+    }
+
+
+def _physical_memory_bytes():
+    try:
+        if os.name == "nt":
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            status = MemoryStatus()
+            status.dwLength = ctypes.sizeof(status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullTotalPhys)
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        return int(pages * page_size)
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def system_metadata():
+    info = platform.uname()
+    return {
+        "platform": platform.platform(),
+        "os": info.system,
+        "os_release": info.release,
+        "architecture": platform.machine(),
+        "cpu_model": platform.processor() or info.processor or None,
+        "logical_cpu_count": os.cpu_count(),
+        "memory_total_bytes": _physical_memory_bytes(),
+        "python": platform.python_version(),
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=200_000)
@@ -140,8 +206,7 @@ def main():
     print("Mau: %d truy van/loai, %d lan tao DB doc lap, batch=%d" % (a.repeat, a.write_repeat, 1000))
 
     res = {"metadata": {
-        "platform": platform.platform(),
-        "python": platform.python_version(),
+        **system_metadata(),
         "events": a.n,
         "single_write_events": a.single,
         "query_repeats": a.repeat,
@@ -150,6 +215,10 @@ def main():
         "sqlite_journal_mode": "WAL",
         "sqlite_synchronous": "NORMAL",
         "rocksdb_fsync_per_write": False,
+        "keyword_search": "literal case-insensitive ASCII substring scan; limit=100; keyword=timeout",
+        "keyword_search_dataset_events": a.n + a.single,
+        "keyword_search_limit": 100,
+        "keyword_search_may_stop_after_limit": True,
     }}
 
     rocks = LogStore(os.path.join(work, "rocks"))
@@ -206,6 +275,11 @@ def main():
     bench_pair("source_10min_ms",
                lambda lo, hi: rocks.query(lo, hi, source="payment-service", limit=100),
                lambda lo, hi: lite.source_query(lo, hi, "payment-service", 100))
+    res["message_substring_scan_ms"] = keyword_search_summary(
+        lambda keyword, limit: rocks.query(contains=keyword, limit=limit),
+        lambda keyword, limit: lite.contains_query(keyword, limit=limit),
+        keyword="timeout", repeats=a.repeat, limit=100,
+    )
 
     # --- 4. lay 1 ban ghi theo id (chi RocksDB co "id" dang key; SQLite lay theo rowid)
     ids = [e["id"] for e in rocks.query(limit=2000)]

@@ -3,7 +3,7 @@
 import re
 from functools import wraps
 
-from flask import Blueprint, current_app, jsonify, redirect, render_template, request, session, url_for
+from flask import Blueprint, current_app, jsonify, make_response, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
@@ -133,11 +133,23 @@ def login():
     error = None
     if request.method == "POST":
         username = request.form.get("username", "").strip().lower()
-        user = get_store().get_user(username)
         password = request.form.get("password", "")
+        throttle = current_app.extensions["login_throttle"]
+        client_address = request.remote_addr or "unknown"
+        retry_after = throttle.retry_after(username, client_address)
+        if retry_after:
+            response = make_response(render_template(
+                "login.html", error="Dang nhap tam thoi bi gioi han; hay thu lai sau.",
+                csrf_token=session["_csrf"],
+            ), 429)
+            response.headers["Retry-After"] = str(retry_after)
+            return response
+        user = get_store().get_user(username)
         if not user or not user.get("enabled", True) or not check_password_hash(user["password_hash"], password):
+            throttle.record_failure(username, client_address)
             error = "ten dang nhap hoac mat khau khong dung"
         else:
+            throttle.clear_account(username)
             session.clear()
             session["username"] = username
             return redirect(url_for("auth.index"))

@@ -51,7 +51,7 @@
   {% if user %}
   <p>{{ user.username }} · {{ user.role }}</p>
   <nav>
-    {% if user.role == 'admin' %}<a href="/users">Quản lý người dùng</a>{% endif %}
+    {% if user.role == 'admin' %}<a href="/audit">Nhật ký kiểm toán</a><a href="/users">Quản lý người dùng</a>{% endif %}
     <form method="post" action="/logout" style="margin:0">
       <input type="hidden" name="csrf_token" value="{{ session.get('_csrf', '') }}">
       <button class="secondary" type="submit">Đăng xuất</button>

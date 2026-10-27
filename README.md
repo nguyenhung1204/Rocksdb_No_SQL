@@ -61,7 +61,7 @@ Copy-Item .env.example .env
 py -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-Dán chuỗi vừa tạo vào `LOGSTORE_SECRET_KEY` trong `.env`. Nếu dùng `/api/ingest`, tạo thêm một chuỗi ngẫu nhiên khác và đặt vào `LOGSTORE_INGEST_TOKEN`; nếu để trống, API ingest bị tắt. Không commit `.env` hoặc chia sẻ các giá trị này.
+Dán chuỗi vừa tạo vào `LOGSTORE_SECRET_KEY` trong `.env`. Nếu dùng `/api/ingest`, tạo chuỗi ngẫu nhiên riêng và đặt vào `LOGSTORE_INGEST_TOKEN`; nếu để trống, API ingest bị tắt. Khi có nhiều nguồn gửi log, dùng `LOGSTORE_INGEST_TOKENS` làm JSON map tên nguồn → token và bỏ giá trị ở `LOGSTORE_INGEST_TOKEN`. Không commit `.env` hoặc chia sẻ các giá trị này.
 
 ```powershell
 docker compose up --build -d
@@ -190,9 +190,23 @@ CLI cũng có `seed-demo --password`: tự nhập mật khẩu tạm riêng thay
 
 Restore trên web sao checkpoint sang thư mục mới `data/restores/restore-...`, chuyển ứng dụng sang DB đó và ghi lại đường dẫn đang hoạt động trong `data/.logstore-state.json`. Khi app khởi động lại, nó tự mở DB đã restore cùng thư mục backup tương ứng. Nếu đã cấu hình `LOGSTORE_PATH` hoặc `LOGSTORE_BACKUP_PATH`, giá trị cấu hình tường minh được ưu tiên hơn manifest; hãy bỏ cấu hình đó hoặc cập nhật nó tới đường dẫn restore trước khi khởi động lại để tiếp tục dùng DB vừa khôi phục. Muốn chuyển hẳn về DB mặc định, dừng app và xóa `data/.logstore-state.json`; đừng xóa thư mục DB nếu cần giữ dữ liệu.
 
+## Retention và xoay vòng checkpoint
+
+Retention tự động mặc định tắt (`LOGSTORE_RETENTION_HOURS=0`). Đặt số giờ lớn hơn 0 để bật; `LOGSTORE_RETENTION_INTERVAL_SECONDS` đặt chu kỳ chạy (1–86.400 giây, mặc định 3.600). Worker chỉ chạy khi khởi động bằng `app.py`, dùng DB hiện đang hoạt động sau restore và ghi số event đã xóa vào log ứng dụng. Event audit chuẩn được giữ lại. Vì retention xóa dữ liệu, hãy kiểm tra cấu hình và tạo backup trước khi bật.
+
+Xoay vòng backup cũng mặc định tắt (`LOGSTORE_BACKUP_RETENTION_COUNT=0`). Đặt số dương để sau mỗi checkpoint tạo thành công, giữ lại số checkpoint hợp lệ mới nhất trong `LOGSTORE_BACKUP_PATH`; chỉ thư mục có tên backup hợp lệ và manifest RocksDB đúng định dạng mới được xét xóa. Nếu bước xoay vòng lỗi, checkpoint vừa tạo vẫn được giữ.
+
+## Nhật ký kiểm toán và giới hạn đăng nhập
+
+Trang `/audit` và API `GET /api/audit` chỉ dành cho admin. API nhận `limit` từ 1 đến 100 và `cursor` từ phản hồi trước đó; nó chỉ trả các audit event chuẩn, kể cả khi các event mẫu thông thường dùng cùng `audit-service` source. Phản hồi chỉ có thời điểm, actor, action, target và mã kết quả. Audit lưu trong cùng RocksDB nên restore checkpoint cũ có thể làm lùi nhật ký; đây không phải kho audit độc lập chống sửa đổi.
+
+Đăng nhập bị giới hạn tạm thời sau 5 lần sai cho cùng tài khoản hoặc 25 lần sai từ cùng địa chỉ client trong cửa sổ 60 giây. Thời gian chờ là 60 giây và phản hồi HTTP 429 có `Retry-After`. Bộ đếm nằm trong bộ nhớ tiến trình, được giới hạn kích thước và tự hết hạn; khởi động lại app sẽ xóa bộ đếm. Đăng nhập thành công xóa trạng thái thất bại của tài khoản đó.
+
 ## Gửi log từ một ứng dụng khác
 
-`POST /api/ingest` nhận một sự kiện hoặc một danh sách JSON tối đa 100.000 sự kiện. Gửi `Authorization: Bearer <token>`. Endpoint bị tắt nếu chưa đặt `LOGSTORE_INGEST_TOKEN`; nó không cần phiên trình duyệt/CSRF nhưng vẫn kiểm tra Bearer token và giới hạn request 10 MB.
+`POST /api/ingest` nhận một sự kiện hoặc một danh sách JSON tối đa 100.000 sự kiện. Gửi `Authorization: Bearer <token>`. Mỗi bản ghi cần `source_event_id` ổn định do ứng dụng nguồn cấp. Cặp producer + ID này giúp retry trả lại ID event cũ thay vì ghi trùng; dùng lại ID với nội dung khác nhận HTTP 409. Mapping bị xóa khi event bị xóa hoặc hết hạn retention. Endpoint không cần phiên trình duyệt/CSRF nhưng vẫn kiểm tra Bearer token và giới hạn request 10 MB.
+
+Với một nguồn duy nhất, đặt `LOGSTORE_INGEST_TOKEN`. Với nhiều nguồn, đặt `LOGSTORE_INGEST_TOKENS` thành JSON object như `{"checkout-service":"secret-a","payment-service":"secret-b"}`; giá trị token phải khác nhau. Server suy ra tên producer từ token đã xác thực, không lấy tên producer từ request. Cấu hình nhiều nguồn và token legacy không thể bật đồng thời.
 
 Mở PowerShell thứ nhất, tạo token tạm và chạy app:
 
@@ -209,15 +223,17 @@ $env:LOGSTORE_INGEST_TOKEN = "<dan-token-tu-cua-so-thu-nhat>"
 .\.venv\Scripts\python.exe examples\emit_logs.py
 ```
 
-Mẫu gửi bốn sự kiện thuộc cùng `trace_id=ORDER-2026-1042`. Tìm trace đó trên dashboard. Server sẽ ghi thêm một audit event cho lần ingest thành công. Token chỉ dùng cục bộ; không commit token lên GitHub hoặc mở app ra Internet.
+Mẫu gửi bốn sự kiện thuộc cùng `trace_id=ORDER-2026-1042`. Chạy lại script sẽ không tạo event trùng vì mỗi bản ghi giữ nguyên `source_event_id`. Tìm trace đó trên dashboard. Server sẽ ghi thêm một audit event cho lần ingest thành công. Token chỉ dùng cục bộ; không commit token lên GitHub hoặc mở app ra Internet.
 
 ## Benchmark RocksDB và SQLite
 
 ```powershell
-.\.venv\Scripts\python.exe bench.py --n 200000 --single 5000 --write-repeat 5 --repeat 1000 --json data\benchmark.json
+$result = Join-Path $env:TEMP 'logstore-benchmark.json'
+.\.venv\Scripts\python.exe bench.py --n 200000 --single 5000 --write-repeat 5 --repeat 1000 --json $result
+Copy-Item $result docs/benchmark-results/benchmark-run.json
 ```
 
-Benchmark tạo DB tạm riêng, so sánh ghi theo lô/ghi từng sự kiện, truy vấn, đọc theo ID, dung lượng và retention. Ghi theo lô mặc định chạy trên 5 DB mới độc lập và báo min/median/max; truy vấn mặc định chạy 1.000 mẫu mỗi loại, báo p50/p95/p99 cùng số mẫu. JSON ghi cấu hình máy và điều kiện đo. Có thể giảm thời gian chạy để kiểm tra nhanh bằng `--write-repeat 2 --repeat 30`. SQLite dùng WAL với `synchronous=NORMAL`; RocksDB mặc định không fsync từng lần ghi. Ghi điều kiện đo khi đưa kết quả vào báo cáo. Kết quả tùy workload; không kết luận RocksDB nhanh hơn SQLite trong mọi thao tác.
+Benchmark tạo DB tạm riêng, so sánh ghi theo lô/ghi từng sự kiện, truy vấn, đọc theo ID, dung lượng, retention và quét chuỗi con không phân biệt hoa/thường cho từ khóa ASCII `timeout`, giới hạn 100 kết quả. Quét chuỗi con hiện không có inverted index; phép đo có thể dừng sau khi tìm đủ 100 kết quả nên không đại diện cho trường hợp xấu nhất khi từ khóa hiếm hoặc không khớp. Ghi theo lô mặc định chạy trên 5 DB mới độc lập và báo min/median/max; truy vấn mặc định chạy 1.000 mẫu mỗi loại, báo p50/p95/p99 cùng số mẫu. JSON ghi hệ điều hành, CPU, bộ nhớ, Python, workload và điều kiện đo. Có thể giảm thời gian chạy để kiểm tra nhanh bằng `--write-repeat 2 --repeat 30`. SQLite dùng WAL với `synchronous=NORMAL`; RocksDB mặc định không fsync từng lần ghi. [Kết quả đo 200.000 event trên máy hiện tại](docs/benchmark-results/2026-10-27-local-operations.md) kèm dữ liệu JSON thô. Kết quả tùy workload; không kết luận RocksDB nhanh hơn SQLite trong mọi thao tác.
 
 ## Kiểm thử
 

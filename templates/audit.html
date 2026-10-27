@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Nhật ký kiểm toán · LogStore{% endblock %}
+{% block content %}
+<main>
+  <section class="section">
+    <h2>Nhật ký kiểm toán</h2>
+    <p class="muted">Chỉ quản trị viên xem được. Nhật ký được lưu cùng cơ sở dữ liệu RocksDB; khi khôi phục checkpoint cũ, nhật ký cũng có thể quay về trạng thái tại thời điểm checkpoint.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Thời điểm</th><th>Tài khoản</th><th>Thao tác</th><th>Đối tượng</th><th>Kết quả</th></tr></thead>
+        <tbody id="auditRows"><tr><td colspan="5">Đang tải…</td></tr></tbody>
+      </table>
+    </div>
+    <p id="auditStatus" class="status" role="status"></p>
+    <button id="loadMore" class="secondary" type="button" hidden>Tải nhật ký cũ hơn</button>
+  </section>
+</main>
+{% endblock %}
+{% block scripts %}
+<script>
+(() => {
+  const rows = document.getElementById('auditRows');
+  const status = document.getElementById('auditStatus');
+  const more = document.getElementById('loadMore');
+  let cursor = null;
+  let busy = false;
+  const cell = (value) => {
+    const td = document.createElement('td');
+    td.textContent = value == null ? '—' : String(value);
+    return td;
+  };
+  async function load() {
+    if (busy) return;
+    busy = true;
+    more.disabled = true;
+    try {
+      const firstPage = cursor === null;
+      const query = new URLSearchParams({limit: '50'});
+      if (cursor) query.set('cursor', cursor);
+      const response = await fetch('/api/audit?' + query.toString(), {headers: {'Accept': 'application/json'}});
+      if (!response.ok) throw new Error('Không tải được nhật ký (HTTP ' + response.status + ').');
+      const page = await response.json();
+      more.textContent = 'Tải nhật ký cũ hơn';
+      if (firstPage) rows.replaceChildren();
+      for (const item of page.events) {
+        const tr = document.createElement('tr');
+        const date = new Date(item.ts).toLocaleString();
+        tr.append(cell(date), cell(item.actor), cell(item.action), cell(item.target), cell(item.status));
+        rows.append(tr);
+      }
+      cursor = page.next_cursor;
+      more.hidden = !page.has_more;
+      status.textContent = page.count ? `Đã tải ${page.count} bản ghi.` :
+        (page.has_more ? 'Chưa có audit trong đoạn đã quét; tải đoạn cũ hơn để tiếp tục.' : 'Không còn bản ghi kiểm toán.');
+      status.className = 'status';
+    } catch (error) {
+      status.textContent = error.message;
+      status.className = 'status error';
+      more.hidden = false;
+      more.textContent = 'Thử lại';
+    } finally {
+      busy = false;
+      more.disabled = false;
+    }
+  }
+  more.addEventListener('click', load);
+  load();
+})();
+</script>
+{% endblock %}

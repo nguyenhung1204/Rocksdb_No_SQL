@@ -4,11 +4,13 @@ import atexit
 import os
 
 from webapp import create_app
+from webapp.maintenance import start_retention_worker
 from waitress import serve
 
 
 app = create_app()
-atexit.register(lambda: app.extensions["logstore"].close())
+app.extensions["retention_worker"] = None
+app.extensions["shutdown_complete"] = False
 
 
 def server_options(environ=None):
@@ -29,8 +31,37 @@ def server_options(environ=None):
     return {"host": host, "port": port, "threads": threads}
 
 
+def shutdown_application(application=app):
+    """Stop maintenance before closing whichever store is active after restore."""
+    if application.extensions.get("shutdown_complete"):
+        return
+    worker = application.extensions.pop("retention_worker", None)
+    try:
+        if worker is not None:
+            worker.stop()
+    finally:
+        try:
+            active_store = application.extensions.get("logstore")
+            if active_store is not None:
+                active_store.close()
+        finally:
+            application.extensions["shutdown_complete"] = True
+
+
+def run_server(application=app, server=serve):
+    options = server_options()
+    application.extensions["retention_worker"] = start_retention_worker(application)
+    try:
+        server(application, **options)
+    finally:
+        shutdown_application(application)
+
+
+atexit.register(shutdown_application)
+
+
 if __name__ == "__main__":
     try:
-        serve(app, **server_options())
+        run_server()
     except ValueError as error:
         raise SystemExit(str(error)) from error

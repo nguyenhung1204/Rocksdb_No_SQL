@@ -41,6 +41,110 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(got["fields"], {"a": 1})
         self.assertEqual(got["ts"], T0)
 
+    def test_ingest_replay_is_idempotent_per_producer(self):
+        event = ("INFO", "worker", "started", {"trace_id": "job-1"}, T0)
+
+        first_ids, first_written = self.s.put_ingested_many([event], "agent-a", ["source-1"])
+        replay_ids, replay_written = self.s.put_ingested_many([event], "agent-a", ["source-1"])
+        other_ids, other_written = self.s.put_ingested_many([event], "agent-b", ["source-1"])
+
+        self.assertEqual(first_written, 1)
+        self.assertEqual(replay_written, 0)
+        self.assertEqual(replay_ids, first_ids)
+        self.assertEqual(other_written, 1)
+        self.assertNotEqual(other_ids, first_ids)
+        self.assertEqual(self.s.count(), 2)
+
+    def test_ingest_rejects_conflicting_replay_without_partial_write(self):
+        original = ("INFO", "worker", "original", {}, T0)
+        self.s.put_ingested_many([original], "agent-a", ["source-1"])
+        before = self.s.count()
+
+        with self.assertRaisesRegex(ValueError, "source_event_id"):
+            self.s.put_ingested_many([
+                ("INFO", "worker", "new row", {}, T0 + 1),
+                ("INFO", "worker", "changed payload", {}, T0),
+            ], "agent-a", ["source-2", "source-1"])
+
+        self.assertEqual(self.s.count(), before)
+        self.assertEqual([row["msg"] for row in self.s.query(source="worker")], ["original"])
+
+    def test_duplicate_source_ids_inside_batch_share_one_event(self):
+        event = ("INFO", "worker", "same", {}, T0)
+
+        ids, written = self.s.put_ingested_many(
+            [event, event], "agent-a", ["source-1", "source-1"]
+        )
+
+        self.assertEqual(ids[0], ids[1])
+        self.assertEqual(written, 1)
+        self.assertEqual(self.s.count(), 1)
+
+    def test_duplicate_source_id_with_changed_payload_in_batch_is_rejected_atomically(self):
+        with self.assertRaisesRegex(ValueError, "source_event_id"):
+            self.s.put_ingested_many([
+                ("INFO", "worker", "first", {}, T0),
+                ("INFO", "worker", "changed", {}, T0),
+            ], "agent-a", ["source-1", "source-1"])
+        self.assertEqual(self.s.count(), 0)
+
+    def test_deleting_event_allows_source_id_to_be_reused(self):
+        event = ("INFO", "worker", "first", {}, T0)
+        ids, _ = self.s.put_ingested_many([event], "agent-a", ["source-1"])
+        self.assertTrue(self.s.delete_event(ids[0]))
+
+        replacement_ids, written = self.s.put_ingested_many(
+            [("INFO", "worker", "replacement", {}, T0 + 1)], "agent-a", ["source-1"]
+        )
+
+        self.assertEqual(written, 1)
+        self.assertNotEqual(replacement_ids[0], ids[0])
+        self.assertEqual(self.s.count(), 1)
+
+    def test_idempotency_mapping_survives_reopen_and_checkpoint_restore(self):
+        event = ("INFO", "worker", "stable", {"trace_id": "persist"}, T0)
+        event_ids, written = self.s.put_ingested_many([event], "agent-a", ["source-1"])
+        self.assertEqual(written, 1)
+        checkpoint = os.path.join(self.dir, "backup")
+        self.s.backup(checkpoint)
+        path = self.path
+        self.s.close()
+        self.s = LogStore(path)
+        replay_ids, replay_written = self.s.put_ingested_many([event], "agent-a", ["source-1"])
+        self.assertEqual((replay_ids, replay_written), (event_ids, 0))
+
+        restored_path = os.path.join(self.dir, "restored")
+        LogStore.restore(checkpoint, restored_path)
+        restored = LogStore(restored_path)
+        try:
+            restored_ids, restored_written = restored.put_ingested_many(
+                [event], "agent-a", ["source-1"]
+            )
+            self.assertEqual((restored_ids, restored_written), (event_ids, 0))
+        finally:
+            restored.close()
+
+    def test_retention_releases_idempotency_keys_on_fast_and_audit_paths(self):
+        old_fast = ("INFO", "ingest-fast", "old", {}, T0)
+        fast_ids, _ = self.s.put_ingested_many([old_fast], "agent-a", ["fast"])
+        self.assertEqual(self.s.purge_older_than(T0 + 1), 1)
+        replacement, written = self.s.put_ingested_many(
+            [("INFO", "ingest-fast", "replacement", {}, T0 + 2)], "agent-a", ["fast"]
+        )
+        self.assertEqual(written, 1)
+        self.assertNotEqual(replacement, fast_ids)
+
+        old_slow = ("INFO", "ingest-slow", "old", {}, T0 + 10)
+        slow_ids, _ = self.s.put_ingested_many([old_slow], "agent-a", ["slow"])
+        audit_fields = {"_audit": True, "actor": "admin", "action": "test", "status": 200}
+        self.s._write_events([("INFO", "audit-service", "old audit", audit_fields, T0 + 20)], allow_audit=True)
+        self.assertEqual(self.s.purge_older_than(T0 + 30), 2)
+        replacement, written = self.s.put_ingested_many(
+            [("INFO", "ingest-slow", "replacement", {}, T0 + 31)], "agent-a", ["slow"]
+        )
+        self.assertEqual(written, 1)
+        self.assertNotEqual(replacement, slow_ids)
+
     def test_get_missing(self):
         self.assertIsNone(self.s.get(b"\x00" * 12))
 
