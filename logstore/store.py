@@ -560,6 +560,12 @@ class LogStore:
             cf = self.db
         return sum(1 for _ in self._scan(cf, lo, hi))
 
+    def ping(self):
+        """Read one metadata key to verify that the RocksDB handles are usable."""
+        with self._lock:
+            self.cf_meta.get(META_COUNT_VERSION)
+        return True
+
     def count_by_level(self, start_ms=None, end_ms=None):
         if start_ms is None and end_ms is None:
             return self._event_counts.copy()
@@ -572,42 +578,87 @@ class LogStore:
     # ------------------------------------------------------------- retention
     def purge_older_than(self, cutoff_ms, compact=False):
         """
-        Xoa moi su kien co timestamp < cutoff_ms (chinh sach luu giu - retention).
-        Dung DeleteRange: chi ghi 1 "range tombstone" cho moi khoang, rat re so
-        voi xoa tung key. Dung lai WriteBatch de xoa du lieu + index cung luc.
-        Tra ve so su kien da xoa.
+        Xoa log thuong cu hon cutoff; audit noi bo duoc giu lai.
+        Dung DeleteRange khi khong co audit trong khoang; neu co, xoa log thuong
+        theo WriteBatch nho de khong xoa audit va cac index cua no.
         """
         cutoff = make_id(cutoff_ms, 0)
         with self._lock:
             deleted_by_level = dict.fromkeys(LEVELS, 0)
             deleted = 0
+            has_expired_audit = False
             it = self.db.iter()
             it.seek_to_first()
             while it.valid() and it.key() < cutoff:
                 record = json.loads(it.value().decode("utf-8"))
-                deleted_by_level[record["level"]] += 1
-                deleted += 1
+                if is_internal_audit_event(record):
+                    has_expired_audit = True
+                else:
+                    deleted_by_level[record["level"]] += 1
+                    deleted += 1
                 it.next()
             if not deleted:
                 if compact:
                     self.compact()
                 return 0
 
-            wb = WriteBatch(raw_mode=True)
-            wb.delete_range(MIN_ID, cutoff, self.h_default)
-            for lv in range(len(LEVELS)):
-                p = bytes([lv])
-                wb.delete_range(p + MIN_ID, p + cutoff, self.h_level)
-            for src in self._known_sources:
-                p = src.encode("utf-8") + b"\x00"
-                wb.delete_range(p + MIN_ID, p + cutoff, self.h_source)
-            level_deltas = {level: -count for level, count in deleted_by_level.items() if count}
-            updated_total, updated_counts = self._count_delta_batch(wb, -deleted, level_deltas)
-            self.db.write(wb)
-            self._total_events, self._event_counts = updated_total, updated_counts
-            self._delete_expired_trace_ranges(cutoff)
+            if has_expired_audit:
+                deleted = self._purge_expired_preserving_audit(cutoff)
+            else:
+                wb = WriteBatch(raw_mode=True)
+                wb.delete_range(MIN_ID, cutoff, self.h_default)
+                for lv in range(len(LEVELS)):
+                    p = bytes([lv])
+                    wb.delete_range(p + MIN_ID, p + cutoff, self.h_level)
+                for src in self._known_sources:
+                    p = src.encode("utf-8") + b"\x00"
+                    wb.delete_range(p + MIN_ID, p + cutoff, self.h_source)
+                level_deltas = {level: -count for level, count in deleted_by_level.items() if count}
+                updated_total, updated_counts = self._count_delta_batch(wb, -deleted, level_deltas)
+                self.db.write(wb)
+                self._total_events, self._event_counts = updated_total, updated_counts
+                self._delete_expired_trace_ranges(cutoff)
         if compact:
             self.compact()
+        return deleted
+
+    def _purge_expired_preserving_audit(self, cutoff):
+        it = self.db.iter()
+        it.seek_to_first()
+        batch = WriteBatch(raw_mode=True)
+        pending = 0
+        pending_levels = dict.fromkeys(LEVELS, 0)
+        deleted = 0
+
+        def flush():
+            nonlocal batch, pending, pending_levels
+            if not pending:
+                return
+            level_deltas = {level: -count for level, count in pending_levels.items() if count}
+            updated_total, updated_counts = self._count_delta_batch(batch, -pending, level_deltas)
+            self.db.write(batch)
+            self._total_events, self._event_counts = updated_total, updated_counts
+            batch = WriteBatch(raw_mode=True)
+            pending = 0
+            pending_levels = dict.fromkeys(LEVELS, 0)
+
+        while it.valid() and it.key() < cutoff:
+            event_id = it.key()
+            record = json.loads(it.value().decode("utf-8"))
+            if not is_internal_audit_event(record):
+                batch.delete(event_id, self.h_default)
+                batch.delete(bytes([LEVEL_NUM[record["level"]]]) + event_id, self.h_level)
+                batch.delete(record["source"].encode("utf-8") + b"\x00" + event_id, self.h_source)
+                trace_id = (record.get("fields") or {}).get("trace_id")
+                if trace_id:
+                    batch.delete(trace_id.encode("utf-8") + b"\x00" + event_id, self.h_trace)
+                pending_levels[record["level"]] -= 1
+                pending += 1
+                deleted += 1
+                if pending >= 1000:
+                    flush()
+            it.next()
+        flush()
         return deleted
 
     def _delete_expired_trace_ranges(self, cutoff):

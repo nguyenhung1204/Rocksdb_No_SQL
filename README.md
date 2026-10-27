@@ -50,7 +50,28 @@ Repository chứa mã nguồn; không kèm DB đã tạo sẵn hoặc mật kh�
 - Mặc định DB ở `data/webdb`, checkpoint ở `data/backups`; tài khoản và sự kiện được giữ trên ổ đĩa qua các lần chạy. Giữ thư mục `data/` nếu muốn giữ dữ liệu.
 - Để bắt đầu lại từ DB trắng, dừng app rồi **đổi tên** thư mục `data` thành một tên chưa tồn tại, ví dụ `data-saved`. Chạy app lại để tạo `data` mới. Nếu từng đặt `LOGSTORE_PATH`, hãy kiểm tra thư mục DB đang dùng trước khi thực hiện.
 
-Ứng dụng tự tạo khóa phiên mới mỗi lần chạy, nên có thể cần đăng nhập lại sau khi khởi động. Nếu muốn giữ phiên, đặt `LOGSTORE_SECRET_KEY` bằng chuỗi bí mật ngẫu nhiên của riêng nhóm và dùng lại cùng giá trị trong các lần chạy; không đưa giá trị này lên GitHub. App mặc định chỉ lắng nghe tại `127.0.0.1`.
+Ứng dụng chạy bằng Waitress, tự tạo khóa phiên mới mỗi lần chạy nên có thể cần đăng nhập lại sau khi khởi động. Nếu muốn giữ phiên, đặt `LOGSTORE_SECRET_KEY` bằng chuỗi bí mật ngẫu nhiên của riêng nhóm và dùng lại cùng giá trị trong các lần chạy; không đưa giá trị này lên GitHub. App mặc định chỉ lắng nghe tại `127.0.0.1`; có thể đổi `LOGSTORE_HOST`, `LOGSTORE_PORT` và `LOGSTORE_THREADS` nếu cần.
+
+## Chạy bằng Docker Compose
+
+Đây là cách chạy đóng gói thêm bên cạnh hướng dẫn Python ở trên. Cài Docker Desktop, mở PowerShell tại thư mục dự án, rồi tạo tệp cấu hình riêng:
+
+```powershell
+Copy-Item .env.example .env
+py -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Dán chuỗi vừa tạo vào `LOGSTORE_SECRET_KEY` trong `.env`. Nếu dùng `/api/ingest`, tạo thêm một chuỗi ngẫu nhiên khác và đặt vào `LOGSTORE_INGEST_TOKEN`; nếu để trống, API ingest bị tắt. Không commit `.env` hoặc chia sẻ các giá trị này.
+
+```powershell
+docker compose up --build -d
+docker compose ps
+docker compose logs -f logstore
+```
+
+Mở **[http://127.0.0.1:5000](http://127.0.0.1:5000)** rồi tạo tài khoản admin như cách chạy local. Docker health check dùng `/health/ready`; `/health/live` chỉ xác nhận tiến trình còn phản hồi. DB và checkpoint nằm trong volume `logstore-data`, nên vẫn còn sau khi thay container. `docker compose down` dừng app và giữ volume; chỉ dùng `docker compose down -v` khi muốn xóa cả dữ liệu. Cổng chỉ được công bố trên loopback máy host. Nếu tự đổi bind host để cho máy khác truy cập, cần tự cấu hình TLS, firewall và secret phù hợp trước khi mở mạng.
+
+Mẫu Compose đặt `LOGSTORE_COOKIE_SECURE=false` vì nó chỉ dùng HTTP trên loopback. Khi đặt sau reverse proxy có HTTPS, hãy bật `LOGSTORE_COOKIE_SECURE=true` trước khi cho người dùng đăng nhập.
 
 ## Lỗi thường gặp khi cài/chạy
 
@@ -89,6 +110,9 @@ Rocksdb_No_SQL/
 ├── bench.py                    # So sánh benchmark RocksDB và SQLite
 ├── examples/
 │   └── emit_logs.py            # Ví dụ ứng dụng khác gửi log qua Bearer token
+├── Dockerfile                  # Image chạy Waitress dưới user không phải root
+├── docker-compose.yml          # Chạy local kèm volume dữ liệu và health check
+├── .env.example                # Mẫu cấu hình; tự tạo secret trước khi chạy
 └── requirements.txt
 ```
 
@@ -190,10 +214,10 @@ Mẫu gửi bốn sự kiện thuộc cùng `trace_id=ORDER-2026-1042`. Tìm tra
 ## Benchmark RocksDB và SQLite
 
 ```powershell
-.\.venv\Scripts\python.exe bench.py --n 200000 --single 5000 --write-repeat 3 --repeat 30 --json data\benchmark.json
+.\.venv\Scripts\python.exe bench.py --n 200000 --single 5000 --write-repeat 5 --repeat 1000 --json data\benchmark.json
 ```
 
-Benchmark tạo DB tạm riêng, so sánh ghi theo lô/ghi từng sự kiện, truy vấn, đọc theo ID, dung lượng và retention. Ghi theo lô được chạy lặp trên DB mới (mặc định 3 lần); truy vấn báo thêm p50/p95/p99. Có thể đổi số lần chạy bằng `--write-repeat 5 --repeat 50`. SQLite dùng WAL với `synchronous=NORMAL`; RocksDB mặc định không fsync từng lần ghi. Ghi cấu hình máy, số bản ghi và điều kiện đo khi đưa kết quả vào báo cáo. Kết quả tùy workload; không kết luận RocksDB nhanh hơn SQLite trong mọi thao tác.
+Benchmark tạo DB tạm riêng, so sánh ghi theo lô/ghi từng sự kiện, truy vấn, đọc theo ID, dung lượng và retention. Ghi theo lô mặc định chạy trên 5 DB mới độc lập và báo min/median/max; truy vấn mặc định chạy 1.000 mẫu mỗi loại, báo p50/p95/p99 cùng số mẫu. JSON ghi cấu hình máy và điều kiện đo. Có thể giảm thời gian chạy để kiểm tra nhanh bằng `--write-repeat 2 --repeat 30`. SQLite dùng WAL với `synchronous=NORMAL`; RocksDB mặc định không fsync từng lần ghi. Ghi điều kiện đo khi đưa kết quả vào báo cáo. Kết quả tùy workload; không kết luận RocksDB nhanh hơn SQLite trong mọi thao tác.
 
 ## Kiểm thử
 
@@ -230,7 +254,7 @@ Ghi, sửa, xóa sự kiện cập nhật bản ghi chính, index và bộ đế
 - Mật khẩu demo đã được băm, nhưng đây vẫn là ứng dụng chạy cục bộ cho đồ án, không phải cấu hình triển khai Internet.
 - API nhập giới hạn 10 MB và 100.000 sự kiện mỗi tệp; xuất web giới hạn 1.000.000 sự kiện. CLI cũng giới hạn import 100.000 sự kiện.
 - API tra cứu hiển thị tối đa 1.000 sự kiện mỗi trang; giao diện có nút trang trước/sau. Chỉ những route ghi mới chờ khóa ứng dụng; thao tác đọc dùng khả năng đọc đồng thời của RocksDB.
-- Bộ đếm và audit event nằm trong cùng RocksDB nên được backup/restore và retention theo chính sách của kho sự kiện. Nếu cần audit chống can thiệp độc lập, cần chuyển audit sang hệ thống lưu trữ riêng.
+- Bộ đếm và audit event nằm trong cùng RocksDB nên được backup/restore cùng kho sự kiện; retention thường giữ lại audit event chuẩn từ `audit-service`. Nếu cần audit chống can thiệp độc lập, cần chuyển audit sang hệ thống lưu trữ riêng.
 - Số liệu benchmark trong ghi chú nhóm cũ là từ máy khác. Báo cáo chỉ dùng số nhóm tự chạy, kèm cấu hình máy và điều kiện đo.
 
 ## Tài liệu trong dự án

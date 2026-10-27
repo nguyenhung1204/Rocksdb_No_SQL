@@ -1,0 +1,23 @@
+services:
+  logstore:
+    build: .
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:${LOGSTORE_PUBLISHED_PORT:-5000}:5000"
+    volumes:
+      - logstore-data:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health/ready', timeout=3)"
+      interval: 10s
+      timeout: 4s
+      retries: 6
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  logstore-data:

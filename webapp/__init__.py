@@ -65,7 +65,27 @@ class StoreLifecycleLock:
                 self._condition.notify_all()
 
 
+def _cookie_secure_setting(runtime_environment):
+    configured = os.environ.get("LOGSTORE_COOKIE_SECURE")
+    if configured is None:
+        return runtime_environment == "production"
+    value = configured.strip().lower()
+    if value in {"1", "true", "yes"}:
+        return True
+    if value in {"0", "false", "no"}:
+        return False
+    raise ValueError("LOGSTORE_COOKIE_SECURE phai la true hoac false")
+
+
 def create_app(db_path=None, backup_path=None, secret_key=None):
+    runtime_environment = os.environ.get("LOGSTORE_ENV", "development").strip().lower()
+    configured_secret = secret_key if secret_key is not None else os.environ.get("LOGSTORE_SECRET_KEY")
+    if runtime_environment == "production" and (
+        not isinstance(configured_secret, str) or len(configured_secret.strip()) < 32
+    ):
+        raise RuntimeError("LOGSTORE_SECRET_KEY phai co it nhat 32 ky tu trong production")
+    secure_cookie = _cookie_secure_setting(runtime_environment)
+
     explicit_db_path = db_path is not None or bool(os.environ.get("LOGSTORE_PATH"))
     db_path = Path(db_path or os.environ.get("LOGSTORE_PATH", "data/webdb")).resolve()
     state_path = Path(os.environ.get("LOGSTORE_STATE_PATH", db_path.parent / ".logstore-state.json")).resolve()
@@ -85,7 +105,7 @@ def create_app(db_path=None, backup_path=None, secret_key=None):
     backup_path.mkdir(parents=True, exist_ok=True)
 
     app = Flask(__name__, template_folder="../templates")
-    app.secret_key = secret_key or os.environ.get("LOGSTORE_SECRET_KEY") or secrets.token_urlsafe(32)
+    app.secret_key = configured_secret or secrets.token_urlsafe(32)
     app.config.update(
         LOGSTORE_PATH=str(db_path),
         BACKUP_PATH=str(backup_path),
@@ -94,6 +114,7 @@ def create_app(db_path=None, backup_path=None, secret_key=None):
         MAX_CONTENT_LENGTH=10 * 1024 * 1024,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=secure_cookie,
     )
     app.extensions["logstore"] = LogStore(str(db_path))
     app.extensions["store_lock"] = threading.RLock()
@@ -110,6 +131,19 @@ def create_app(db_path=None, backup_path=None, secret_key=None):
         os.replace(temporary, state_path)
 
     app.extensions["persist_active_paths"] = persist_active_paths
+
+    @app.get("/health/live")
+    def health_live():
+        return jsonify({"status": "live"})
+
+    @app.get("/health/ready")
+    def health_ready():
+        try:
+            app.extensions["logstore"].ping()
+        except Exception:
+            app.logger.warning("RocksDB readiness check failed", exc_info=True)
+            return jsonify({"status": "not_ready"}), 503
+        return jsonify({"status": "ready"})
 
     @app.before_request
     def prepare_request():

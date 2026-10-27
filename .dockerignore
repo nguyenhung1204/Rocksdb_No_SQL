@@ -1,0 +1,16 @@
+.git
+.venv
+venv
+data
+data-saved*
+backups
+restores
+tmp
+.env
+.env.*
+__pycache__
+*.pyc
+*.log
+tests
+docs
+examples

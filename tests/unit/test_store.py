@@ -2,6 +2,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from unittest.mock import patch
 import unittest
 
@@ -302,6 +303,37 @@ class StoreTest(unittest.TestCase):
             self.s.update_event(event_id, msg="tampered")
         with self.assertRaisesRegex(ValueError, "audit"):
             self.s.delete_event(event_id)
+
+    def test_retention_keeps_immutable_audit_events_and_their_indexes(self):
+        now = int(time.time() * 1000)
+        expired_id = self.s.put_event("INFO", "normal", "expire", ts_ms=now - 1000)
+        audit_id = self.s.put_audit("admin", "event.delete", "test:1", 200)
+        recent_id = self.s.put_event("WARN", "normal", "keep", ts_ms=now + 20 * 60_000)
+
+        deleted = self.s.purge_older_than(now + 10 * 60_000)
+
+        self.assertEqual(deleted, 1)
+        self.assertIsNone(self.s.get(expired_id))
+        self.assertEqual(self.s.get(audit_id)["source"], "audit-service")
+        self.assertEqual(self.s.get(recent_id)["msg"], "keep")
+        self.assertEqual([event["id"] for event in self.s.query(source="audit-service")], [audit_id.hex()])
+        self.assertEqual(self.s.count(), 2)
+
+    def test_retention_keeps_audit_when_expired_rows_cross_batch_boundary(self):
+        now = int(time.time() * 1000)
+        self.s.put_many([
+            ("INFO", "bulk-retention", "expire", {"trace_id": "expired-%d" % i}, now - 1000)
+            for i in range(1001)
+        ])
+        audit_id = self.s.put_audit("admin", "backup.create", "test", 201)
+
+        deleted = self.s.purge_older_than(now + 10 * 60_000)
+
+        self.assertEqual(deleted, 1001)
+        self.assertEqual(self.s.count(), 1)
+        self.assertEqual(self.s.get(audit_id)["source"], "audit-service")
+        self.assertEqual(self.s.query(source="bulk-retention"), [])
+        self.assertEqual(len(self.s.query(source="audit-service")), 1)
 
     def test_legacy_audit_marker_on_normal_event_does_not_make_it_immutable(self):
         fields = {"_audit": True, "legacy": "user data"}

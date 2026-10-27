@@ -43,8 +43,16 @@ def percentile(samples, p):
 
 
 def latency_summary(samples):
-    return {"p50": percentile(samples, 50), "p95": percentile(samples, 95),
+    return {"samples": len(samples), "p50": percentile(samples, 50), "p95": percentile(samples, 95),
             "p99": percentile(samples, 99)}
+
+
+def throughput_summary(samples):
+    """Summarize a few independent database builds without implying tail confidence."""
+    if not samples:
+        raise ValueError("samples must not be empty")
+    return {"min": min(samples), "median": statistics.median(samples),
+            "max": max(samples), "samples": len(samples)}
 
 
 # ------------------------------------------------------------------ SQLite
@@ -110,15 +118,15 @@ def throughput_trials(events, work, repeats):
             rates[name].append(len(events) / elapsed if elapsed else float("inf"))
         rocks.close()
         lite.close()
-    return {name: latency_summary(samples) for name, samples in rates.items()}
+    return {name: throughput_summary(samples) for name, samples in rates.items()}
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=200_000)
     ap.add_argument("--single", type=int, default=5_000, help="so lan ghi tung su kien rieng le")
-    ap.add_argument("--repeat", type=int, default=30)
-    ap.add_argument("--write-repeat", type=int, default=3, help="so lan lap ghi tren DB moi")
+    ap.add_argument("--repeat", type=int, default=1000, help="so lan truy van de uoc tinh percentile")
+    ap.add_argument("--write-repeat", type=int, default=5, help="so lan lap ghi tren DB moi")
     ap.add_argument("--json", help="ghi ket qua ra file JSON")
     a = ap.parse_args()
     if a.n < 1 or a.single < 1 or a.repeat < 1 or a.write_repeat < 1:
@@ -129,8 +137,20 @@ def main():
     lo_all = min(e[4] for e in events)
     hi_all = max(e[4] for e in events)
     print("May: %s | Python %s | N=%d su kien" % (platform.platform(), platform.python_version(), a.n))
+    print("Mau: %d truy van/loai, %d lan tao DB doc lap, batch=%d" % (a.repeat, a.write_repeat, 1000))
 
-    res = {}
+    res = {"metadata": {
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "events": a.n,
+        "single_write_events": a.single,
+        "query_repeats": a.repeat,
+        "independent_write_trials": a.write_repeat,
+        "batch_size": 1000,
+        "sqlite_journal_mode": "WAL",
+        "sqlite_synchronous": "NORMAL",
+        "rocksdb_fsync_per_write": False,
+    }}
 
     rocks = LogStore(os.path.join(work, "rocks"))
     lite = SqliteStore(os.path.join(work, "lite.db"))
@@ -212,12 +232,14 @@ def main():
     print("\n%-34s %14s %14s" % ("Phep do", "RocksDB", "SQLite"))
     print("-" * 64)
     for k, v in res.items():
+        if k == "metadata":
+            continue
         if isinstance(v["rocksdb"], dict):
             fmt = lambda stats: " ".join("%s=%.2f" % (p, val) for p, val in stats.items())
             print("%-34s %14s %14s" % (k, fmt(v["rocksdb"]), fmt(v["sqlite"])))
         else:
             print("%-34s %14.2f %14.2f" % (k, v["rocksdb"], v["sqlite"]))
-    print("\n(events_per_s: cao hon la tot; ms/us/mb: thap hon la tot; p50/p95/p99: phan vi cac lan chay)")
+    print("\n(events_per_s: cao hon la tot; ms/us/mb: thap hon la tot; query percentiles use nearest rank and report sample counts)")
 
     if a.json:
         with open(a.json, "w") as f:
