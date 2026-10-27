@@ -2,12 +2,14 @@ import os
 import shutil
 import sys
 import tempfile
+from unittest.mock import patch
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from logstore import LogStore, LEVELS  # noqa: E402
 from logstore.gen import generate  # noqa: E402
+from logstore.store import META_COUNT_LEVEL, META_COUNT_TOTAL, META_COUNT_VERSION  # noqa: E402
 
 T0 = 1_700_000_000_000  # moc thoi gian co dinh de test lap lai duoc
 
@@ -230,6 +232,84 @@ class StoreTest(unittest.TestCase):
     def test_unicode_message(self):
         eid = self.s.put_event("WARN", "dich-vu", "Lỗi kết nối cơ sở dữ liệu", ts_ms=T0)
         self.assertEqual(self.s.get(eid)["msg"], "Lỗi kết nối cơ sở dữ liệu")
+
+    def test_query_cursor_pages_events_sharing_the_same_timestamp(self):
+        ids = self.s.put_many([
+            ("INFO", "page-test", str(i), {}, T0) for i in range(5)
+        ])
+
+        first = self.s.query(source="page-test", limit=2)
+        second = self.s.query(source="page-test", limit=2, before_id=first[-1]["id"])
+        third = self.s.query(source="page-test", limit=2, before_id=second[-1]["id"])
+
+        self.assertEqual([event["id"] for event in first + second + third],
+                         [event.hex() for event in reversed(ids)])
+
+    def test_lifetime_counts_survive_update_delete_purge_and_reopen(self):
+        error_id = self.s.put_event("ERROR", "counts", "old", ts_ms=T0)
+        self.s.put_event("INFO", "counts", "keep", ts_ms=T0 + 1000)
+        self.assertEqual(self.s.count(), 2)
+        self.assertEqual(self.s.count_by_level(), {
+            "DEBUG": 0, "INFO": 1, "WARN": 0, "ERROR": 1, "FATAL": 0,
+        })
+
+        self.s.update_event(error_id, level="INFO")
+        self.assertEqual(self.s.count_by_level()["ERROR"], 0)
+        self.assertEqual(self.s.count_by_level()["INFO"], 2)
+        self.assertEqual(self.s.purge_older_than(T0 + 500), 1)
+        self.assertEqual(self.s.count(), 1)
+
+        path = self.path
+        self.s.close()
+        self.s = LogStore(path)
+        self.assertEqual(self.s.count(), 1)
+        self.assertEqual(self.s.count_by_level()["INFO"], 1)
+
+        with patch.object(self.s, "_scan", side_effect=AssertionError("lifetime count scanned event keys")):
+            self.assertEqual(self.s.count(), 1)
+            self.assertEqual(self.s.count_by_level()["INFO"], 1)
+
+    def test_legacy_database_migrates_counts_once_on_open(self):
+        self.s.put_many([
+            ("INFO", "old-db", "one", {}, T0),
+            ("ERROR", "old-db", "two", {}, T0 + 1),
+        ])
+        self.s.cf_meta.delete(META_COUNT_VERSION)
+        self.s.cf_meta.delete(META_COUNT_TOTAL)
+        for level in LEVELS:
+            self.s.cf_meta.delete(META_COUNT_LEVEL + level.encode("ascii"))
+        path = self.path
+        self.s.close()
+        self.s = LogStore(path)
+
+        self.assertEqual(self.s.count(), 2)
+        self.assertEqual(self.s.count_by_level()["INFO"], 1)
+        with patch.object(self.s, "_scan", side_effect=AssertionError("count migration repeated")):
+            self.assertEqual(self.s.count(), 2)
+
+    def test_trace_ids_are_not_retained_in_an_unbounded_python_set(self):
+        self.s.put_many([
+            ("INFO", "traces", "message", {"trace_id": "trace-%04d" % i}, T0 + i)
+            for i in range(200)
+        ])
+        self.assertEqual(self.s.purge_older_than(T0 + 100), 100)
+        self.assertEqual(self.s.count(), 100)
+        self.assertFalse(hasattr(self.s, "_known_traces"))
+
+    def test_audit_events_cannot_be_updated_or_deleted(self):
+        event_id = self.s.put_audit("admin", "event.delete", "test:1", 200)
+        with self.assertRaisesRegex(ValueError, "audit"):
+            self.s.update_event(event_id, msg="tampered")
+        with self.assertRaisesRegex(ValueError, "audit"):
+            self.s.delete_event(event_id)
+
+    def test_legacy_audit_marker_on_normal_event_does_not_make_it_immutable(self):
+        fields = {"_audit": True, "legacy": "user data"}
+        event_id = self.s.put_event("INFO", "legacy-source", "older row", fields, T0)
+
+        updated = self.s.update_event(event_id, msg="updated")
+        self.assertEqual(updated["msg"], "updated")
+        self.assertTrue(self.s.delete_event(event_id))
 
 
 if __name__ == "__main__":

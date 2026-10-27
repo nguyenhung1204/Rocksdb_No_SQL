@@ -54,7 +54,8 @@ class AppAuthTest(unittest.TestCase):
         response = self.client.get("/")
         page = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
-        for label in ("Ghi sự kiện", "Trace ID", "Xuất JSONL", "Tạo bản sao lưu", "Khôi phục bản sao lưu", "columnFamilies"):
+        for label in ("Ghi sự kiện", "Trace ID", "Xuất JSONL", "Tạo bản sao lưu", "Khôi phục bản sao lưu",
+                      "Trang trước", "Trang tiếp", "columnFamilies"):
             self.assertIn(label, page)
 
     def test_viewer_can_query_but_cannot_mutate(self):

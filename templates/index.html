@@ -60,6 +60,7 @@
       <button type="submit">Tìm kiếm</button>
     </form>
     <div id="queryStatus" class="status" role="status"></div>
+    <div class="row"><button type="button" class="secondary" id="previousPage" disabled>Trang trước</button><button type="button" class="secondary" id="nextPage" disabled>Trang tiếp</button></div>
     <div class="table-wrap"><table>
       <thead><tr><th>Thời gian</th><th>Mức</th><th>Nguồn</th><th>Trace ID</th><th>Nội dung</th>{% if user.role in ['admin', 'operator'] %}<th>Thao tác</th>{% endif %}</tr></thead>
       <tbody id="events"></tbody>
@@ -87,6 +88,7 @@ const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 const role = {{ user.role|tojson }};
 const canWrite = role === 'admin' || role === 'operator';
 const $ = id => document.getElementById(id);
+let pageCursors=[null], pageIndex=0, nextPageCursor=null;
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtBytes = value => value < 1024 ? value + ' B' : value < 1048576 ? (value/1024).toFixed(1) + ' KB' : (value/1048576).toFixed(1) + ' MB';
 const fmtTime = ms => new Date(ms).toLocaleString('vi-VN');
@@ -114,7 +116,8 @@ async function loadStats() {
   select.innerHTML='<option value="">Tất cả</option>'+result.sources.map(s=>'<option value="'+esc(s)+'">'+esc(s)+'</option>').join('');
   select.value=selected;
 }
-async function runQuery() {
+async function runQuery(reset=false) {
+  if (reset) { pageCursors=[null]; pageIndex=0; }
   const params=new URLSearchParams();
   if ($('lastMinutes').value) params.set('last_minutes',$('lastMinutes').value);
   if ($('queryLevel').value) params.set('level',$('queryLevel').value);
@@ -122,15 +125,21 @@ async function runQuery() {
   if ($('queryTrace').value) params.set('trace_id',$('queryTrace').value.trim());
   if ($('queryText').value) params.set('q',$('queryText').value.trim());
   params.set('limit',$('queryLimit').value||'50');
+  if (pageCursors[pageIndex]) params.set('cursor',pageCursors[pageIndex]);
   try {
     const result=await api('/api/events?'+params.toString());
-    $('queryStatus').textContent=result.count+' kết quả · '+result.took_ms+' ms';
+    nextPageCursor=result.next_cursor;
+    $('queryStatus').textContent=result.count+' kết quả · '+result.took_ms+' ms'+(result.has_more?' · còn trang sau':'');
+    $('previousPage').disabled=pageIndex===0;
+    $('nextPage').disabled=!result.has_more;
     $('events').innerHTML=result.events.map(event=>'<tr><td class="ts">'+esc(fmtTime(event.ts))+'</td><td><span class="level '+esc(event.level)+'">'+esc(event.level)+'</span></td><td>'+esc(event.source)+'</td><td>'+esc((event.fields||{}).trace_id||'')+'</td><td>'+esc(event.msg)+'</td>'+
       (canWrite?'<td class="actions"><button class="secondary" data-edit="'+event.id+'">Sửa</button><button class="danger" data-delete="'+event.id+'">Xóa</button></td>':'')+'</tr>').join('');
   } catch(error) { $('queryStatus').textContent=error.message; }
 }
-async function refresh(){await loadStats();await runQuery();}
-$('queryForm').addEventListener('submit',event=>{event.preventDefault();runQuery();});
+async function refresh(){await loadStats();await runQuery(true);}
+$('queryForm').addEventListener('submit',event=>{event.preventDefault();runQuery(true);});
+$('nextPage').addEventListener('click',()=>{if(nextPageCursor){pageCursors.push(nextPageCursor);pageIndex++;runQuery();}});
+$('previousPage').addEventListener('click',()=>{if(pageIndex>0){pageIndex--;runQuery();}});
 if(canWrite){
   $('eventForm').addEventListener('submit',async event=>{
     event.preventDefault(); const fields=$('writeTrace').value.trim()?{trace_id:$('writeTrace').value.trim()}:{};

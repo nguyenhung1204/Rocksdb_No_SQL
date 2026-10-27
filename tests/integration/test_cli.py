@@ -37,11 +37,18 @@ class CliExchangeTest(unittest.TestCase):
         imported = self.run_cli("import", source)
         self.assertEqual(imported.returncode, 0, imported.stderr)
         self.assertIn("2", imported.stdout)
+        with LogStore(self.db) as store:
+            store.put_audit("admin", "test.audit")
+            store.put_event("INFO", "legacy", "old marker", {"_audit": True})
         exported = self.run_cli("export", output)
         self.assertEqual(exported.returncode, 0, exported.stderr)
         with open(output, encoding="utf-8") as stream:
             rows = [json.loads(line) for line in stream]
-        self.assertEqual({row["msg"] for row in rows}, {"one", "two"})
+        self.assertEqual({row["msg"] for row in rows}, {"one", "two", "old marker"})
+        self.assertFalse(any(row["source"] == "audit-service" for row in rows))
+        self.assertTrue(any(row["source"] == "legacy" and row["fields"].get("_audit") for row in rows))
+        reimported = self.run_cli("import", output)
+        self.assertEqual(reimported.returncode, 0, reimported.stderr)
 
     def test_invalid_import_does_not_write_partial_rows(self):
         source = os.path.join(self.root, "invalid.jsonl")

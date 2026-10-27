@@ -18,6 +18,7 @@ import time
 from logstore import LogStore, LEVELS
 from logstore.demo import seed_demo
 from logstore.gen import generate
+from logstore.store import is_internal_audit_event
 
 DEFAULT_DB = os.environ.get("LOGSTORE_PATH", "data/logdb")
 
@@ -189,11 +190,15 @@ def cmd_export(a, s):
         raise ValueError("co %d su kien, vuot qua gioi han --limit %d" % (total, a.limit))
     rows = s.query(limit=a.limit)
     os.makedirs(os.path.dirname(os.path.abspath(a.path)), exist_ok=True)
+    exported_count = 0
     with open(a.path, "w", encoding="utf-8", newline="\n") as stream:
         for event in rows:
+            if is_internal_audit_event(event):
+                continue
             record = {key: event[key] for key in ("level", "source", "msg", "fields", "ts")}
             stream.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
-    print("Da xuat %d su kien vao %s" % (len(rows), a.path))
+            exported_count += 1
+    print("Da xuat %d su kien vao %s" % (exported_count, a.path))
 
 
 def cmd_restore(a, _s=None):

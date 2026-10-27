@@ -31,13 +31,20 @@ def timed(fn):
     return time.perf_counter() - t, r
 
 
-def median_ms(fn, repeat):
-    xs = []
-    for _ in range(repeat):
-        t = time.perf_counter()
-        fn()
-        xs.append((time.perf_counter() - t) * 1000)
-    return statistics.median(xs)
+def percentile(samples, p):
+    """Nearest-rank percentile of observed values (no interpolation)."""
+    if not samples:
+        raise ValueError("samples must not be empty")
+    if not 0 <= p <= 100:
+        raise ValueError("percentile must be between 0 and 100")
+    ordered = sorted(samples)
+    rank = max(1, (len(ordered) * p + 99) // 100)
+    return ordered[rank - 1]
+
+
+def latency_summary(samples):
+    return {"p50": percentile(samples, 50), "p95": percentile(samples, 95),
+            "p99": percentile(samples, 99)}
 
 
 # ------------------------------------------------------------------ SQLite
@@ -90,13 +97,32 @@ def dir_size(p):
     return sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(p) for f in fs)
 
 
+def throughput_trials(events, work, repeats):
+    rates = {"rocksdb": [], "sqlite": []}
+    for trial in range(repeats):
+        rocks = LogStore(os.path.join(work, "repeat-rocks-%d" % trial))
+        lite = SqliteStore(os.path.join(work, "repeat-lite-%d.db" % trial))
+        for name, store in (("rocksdb", rocks), ("sqlite", lite)):
+            started = time.perf_counter()
+            for offset in range(0, len(events), 1000):
+                store.put_many(events[offset:offset + 1000])
+            elapsed = time.perf_counter() - started
+            rates[name].append(len(events) / elapsed if elapsed else float("inf"))
+        rocks.close()
+        lite.close()
+    return {name: latency_summary(samples) for name, samples in rates.items()}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=200_000)
     ap.add_argument("--single", type=int, default=5_000, help="so lan ghi tung su kien rieng le")
     ap.add_argument("--repeat", type=int, default=30)
+    ap.add_argument("--write-repeat", type=int, default=3, help="so lan lap ghi tren DB moi")
     ap.add_argument("--json", help="ghi ket qua ra file JSON")
     a = ap.parse_args()
+    if a.n < 1 or a.single < 1 or a.repeat < 1 or a.write_repeat < 1:
+        ap.error("n, single, repeat va write-repeat phai lon hon 0")
 
     work = tempfile.mkdtemp(prefix="bench_")
     events = generate(a.n, span_hours=24, seed=1)
@@ -116,6 +142,7 @@ def main():
     t_r, _ = timed(lambda: load(rocks))
     t_s, _ = timed(lambda: load(lite))
     res["write_batch_1000_events_per_s"] = {"rocksdb": a.n / t_r, "sqlite": a.n / t_s}
+    res["write_batch_1000_events_per_s_repeated"] = throughput_trials(events, work, a.write_repeat)
 
     # --- 2. ghi tung su kien (moi lan 1 ghi/commit)
     extra = generate(a.single, end_ms=hi_all + 10_000_000, span_hours=1, seed=2)
@@ -138,9 +165,17 @@ def main():
         return windows[next(it) % len(windows)]
 
     def bench_pair(name, fr, fs):
-        rr = median_ms(lambda: fr(*pick()), a.repeat)
-        ss = median_ms(lambda: fs(*pick()), a.repeat)
-        res[name] = {"rocksdb": rr, "sqlite": ss}
+        samples = {"rocksdb": [], "sqlite": []}
+        for _ in range(a.repeat):
+            lo, hi = pick()
+            for db_name, query in (("rocksdb", fr), ("sqlite", fs)):
+                started = time.perf_counter()
+                query(lo, hi)
+                samples[db_name].append((time.perf_counter() - started) * 1000)
+        res[name] = {db_name: statistics.median(values) for db_name, values in samples.items()}
+        res[name + "_percentiles_ms"] = {
+            db_name: latency_summary(values) for db_name, values in samples.items()
+        }
 
     bench_pair("range_10min_limit100_ms",
                lambda lo, hi: rocks.query(lo, hi, limit=100),
@@ -177,8 +212,12 @@ def main():
     print("\n%-34s %14s %14s" % ("Phep do", "RocksDB", "SQLite"))
     print("-" * 64)
     for k, v in res.items():
-        print("%-34s %14.2f %14.2f" % (k, v["rocksdb"], v["sqlite"]))
-    print("\n(events_per_s: cao hon la tot; ms/us/mb: thap hon la tot)")
+        if isinstance(v["rocksdb"], dict):
+            fmt = lambda stats: " ".join("%s=%.2f" % (p, val) for p, val in stats.items())
+            print("%-34s %14s %14s" % (k, fmt(v["rocksdb"]), fmt(v["sqlite"])))
+        else:
+            print("%-34s %14.2f %14.2f" % (k, v["rocksdb"], v["sqlite"]))
+    print("\n(events_per_s: cao hon la tot; ms/us/mb: thap hon la tot; p50/p95/p99: phan vi cac lan chay)")
 
     if a.json:
         with open(a.json, "w") as f:

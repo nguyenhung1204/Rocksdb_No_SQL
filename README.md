@@ -87,6 +87,8 @@ Rocksdb_No_SQL/
 ├── app.py                      # Chạy ứng dụng web
 ├── cli.py                      # Công cụ dòng lệnh
 ├── bench.py                    # So sánh benchmark RocksDB và SQLite
+├── examples/
+│   └── emit_logs.py            # Ví dụ ứng dụng khác gửi log qua Bearer token
 └── requirements.txt
 ```
 
@@ -162,28 +164,36 @@ CLI cũng có `seed-demo --password`: tự nhập mật khẩu tạm riêng thay
 
 ## Khôi phục DB và chạy lại sau restore
 
-Restore trên web sao checkpoint sang thư mục mới `data/restores/restore-...` rồi chuyển DB đang dùng trong tiến trình hiện tại. **Đường dẫn sau restore chưa được lưu thành cấu hình khởi động**: chạy lại `app.py` với cấu hình mặc định sẽ mở `data/webdb` ban đầu.
+Restore trên web sao checkpoint sang thư mục mới `data/restores/restore-...`, chuyển ứng dụng sang DB đó và ghi lại đường dẫn đang hoạt động trong `data/.logstore-state.json`. Khi app khởi động lại, nó tự mở DB đã restore cùng thư mục backup tương ứng. Nếu đã cấu hình `LOGSTORE_PATH` hoặc `LOGSTORE_BACKUP_PATH`, giá trị cấu hình tường minh được ưu tiên hơn manifest; hãy bỏ cấu hình đó hoặc cập nhật nó tới đường dẫn restore trước khi khởi động lại để tiếp tục dùng DB vừa khôi phục. Muốn chuyển hẳn về DB mặc định, dừng app và xóa `data/.logstore-state.json`; đừng xóa thư mục DB nếu cần giữ dữ liệu.
 
-Để tiếp tục dùng DB đã restore sau khi dừng/chạy lại:
+## Gửi log từ một ứng dụng khác
 
-1. Trước khi dừng, sao chép đường dẫn hiển thị ở **“Thư mục DB đang dùng”** trên dashboard. Có thể lấy cùng giá trị ở trường `path` khi mở `/api/stats` sau khi đăng nhập, hoặc `active_path` trong JSON trả về từ API restore.
-2. Dừng app bằng Ctrl+C. Đặt hai biến dưới đây trong PowerShell tại thư mục dự án; thay phần giữ chỗ bằng đường dẫn vừa sao chép:
+`POST /api/ingest` nhận một sự kiện hoặc một danh sách JSON tối đa 100.000 sự kiện. Gửi `Authorization: Bearer <token>`. Endpoint bị tắt nếu chưa đặt `LOGSTORE_INGEST_TOKEN`; nó không cần phiên trình duyệt/CSRF nhưng vẫn kiểm tra Bearer token và giới hạn request 10 MB.
+
+Mở PowerShell thứ nhất, tạo token tạm và chạy app:
 
 ```powershell
-$env:LOGSTORE_PATH = "<duong-dan-DB-da-restore>"
-$env:LOGSTORE_BACKUP_PATH = "data\backups"
+$env:LOGSTORE_INGEST_TOKEN = [guid]::NewGuid().ToString("N")
+Write-Host $env:LOGSTORE_INGEST_TOKEN
 .\.venv\Scripts\python.exe app.py
 ```
 
-`LOGSTORE_BACKUP_PATH` phải tiếp tục trỏ tới thư mục checkpoint gốc; nếu trước đó dùng đường dẫn tùy chỉnh, dùng lại đường dẫn đó thay cho `data\backups`. Các biến `$env:` chỉ áp dụng cho PowerShell hiện tại; mở cửa sổ mới cần đặt lại. Muốn trở về DB mặc định, dừng app, xóa cấu hình phiên bằng `Remove-Item Env:LOGSTORE_PATH -ErrorAction SilentlyContinue` rồi chạy lại.
+Mở PowerShell thứ hai, dán đúng token đã in rồi chạy client mẫu trong thư mục gốc dự án:
+
+```powershell
+$env:LOGSTORE_INGEST_TOKEN = "<dan-token-tu-cua-so-thu-nhat>"
+.\.venv\Scripts\python.exe examples\emit_logs.py
+```
+
+Mẫu gửi bốn sự kiện thuộc cùng `trace_id=ORDER-2026-1042`. Tìm trace đó trên dashboard. Server sẽ ghi thêm một audit event cho lần ingest thành công. Token chỉ dùng cục bộ; không commit token lên GitHub hoặc mở app ra Internet.
 
 ## Benchmark RocksDB và SQLite
 
 ```powershell
-.\.venv\Scripts\python.exe bench.py --n 200000 --single 5000 --repeat 30 --json data\benchmark.json
+.\.venv\Scripts\python.exe bench.py --n 200000 --single 5000 --write-repeat 3 --repeat 30 --json data\benchmark.json
 ```
 
-Benchmark tạo DB tạm riêng, so sánh ghi theo lô/ghi từng sự kiện, truy vấn, đọc theo ID, dung lượng và retention. SQLite dùng WAL với `synchronous=NORMAL`; RocksDB mặc định không fsync từng lần ghi. Ghi cấu hình máy, số bản ghi và điều kiện đo khi đưa kết quả vào báo cáo. Kết quả tùy workload; không kết luận RocksDB nhanh hơn SQLite trong mọi thao tác.
+Benchmark tạo DB tạm riêng, so sánh ghi theo lô/ghi từng sự kiện, truy vấn, đọc theo ID, dung lượng và retention. Ghi theo lô được chạy lặp trên DB mới (mặc định 3 lần); truy vấn báo thêm p50/p95/p99. Có thể đổi số lần chạy bằng `--write-repeat 5 --repeat 50`. SQLite dùng WAL với `synchronous=NORMAL`; RocksDB mặc định không fsync từng lần ghi. Ghi cấu hình máy, số bản ghi và điều kiện đo khi đưa kết quả vào báo cáo. Kết quả tùy workload; không kết luận RocksDB nhanh hơn SQLite trong mọi thao tác.
 
 ## Kiểm thử
 
@@ -207,20 +217,20 @@ Nếu log đến muộn, hệ thống giữ timestamp của sự kiện và cấ
 | `idx_level` | Index theo mức độ |
 | `idx_source` | Index theo nguồn |
 | `idx_trace` | Index theo trace ID |
-| `meta` | Danh mục nguồn đã gặp |
+| `meta` | Danh mục nguồn và bộ đếm tổng/số lượng theo mức độ |
 | `users` | Tài khoản, password hash, vai trò và trạng thái |
 
-Ghi, sửa, xóa sự kiện cập nhật bản ghi chính và index trong một `WriteBatch`. Truy vấn chuỗi trong nội dung không có index nên cần đọc và lọc bản ghi. Checkpoint nhất quán của RocksDB được sao sang thư mục mới khi restore; ứng dụng chỉ đổi DB đang hoạt động sau khi mở checkpoint thành công.
+Ghi, sửa, xóa sự kiện cập nhật bản ghi chính, index và bộ đếm trong một `WriteBatch`. Bộ đếm tổng/số lượng theo mức độ được nạp trực tiếp từ metadata; DB cũ tự tạo bộ đếm một lần khi mở lại. Retention quét ID trace theo iterator và xóa range theo từng nhóm, không giữ toàn bộ ID trace trong RAM. JSONL import xác thực toàn bộ vào tệp tạm rồi ghi bằng một `WriteBatch` nguyên tử; kích thước upload web được giới hạn 10 MB để chặn dữ liệu đầu vào quá lớn. Export duyệt một snapshot RocksDB bằng iterator dạng stream và dừng ở một triệu sự kiện. JSONL bỏ qua bản ghi audit hệ thống chuẩn từ `audit-service` để tệp có thể nhập lại mà không cho phép giả mạo audit; những sự kiện khác được giữ nguyên, kể cả bản ghi cũ có field `_audit` trùng tên. Checkpoint vẫn giữ toàn bộ audit. App lưu manifest đường dẫn để mở đúng DB sau khi chạy lại, trừ khi đường dẫn được cấu hình tường minh.
 
 ## Hạn chế cần nêu khi bảo vệ
 
 - RocksDB khóa thư mục dữ liệu bằng file `LOCK`, nên chỉ một tiến trình được mở cùng DB. Dừng app web trước khi dùng CLI trên đúng thư mục DB đó.
 - Tìm từ khóa trong nội dung chưa có inverted index.
-- Danh sách trace ID duy nhất được giữ trong bộ nhớ để cập nhật retention; ứng dụng phù hợp với demo cục bộ, cần đánh giá thêm mức dùng RAM nếu dữ liệu có lượng trace ID rất lớn.
+- Số liệu theo khoảng thời gian vẫn phải quét index trong khoảng được hỏi; bộ đếm được cache chỉ áp dụng cho số tổng và tổng theo mức độ.
 - Mật khẩu demo đã được băm, nhưng đây vẫn là ứng dụng chạy cục bộ cho đồ án, không phải cấu hình triển khai Internet.
 - API nhập giới hạn 10 MB và 100.000 sự kiện mỗi tệp; xuất web giới hạn 1.000.000 sự kiện. CLI cũng giới hạn import 100.000 sự kiện.
-- API tra cứu trả tối đa 1.000 sự kiện mỗi lần, chưa có cursor phân trang; thống kê còn quét lại index, import/export web còn xử lý toàn bộ tệp/kết quả trong bộ nhớ.
-- Sau restore, đường dẫn DB đang hoạt động chỉ đổi trong bộ nhớ của tiến trình. Cần đặt lại `LOGSTORE_PATH` khi khởi động nếu muốn tiếp tục dùng bản đã khôi phục, như hướng dẫn ở trên.
+- API tra cứu hiển thị tối đa 1.000 sự kiện mỗi trang; giao diện có nút trang trước/sau. Chỉ những route ghi mới chờ khóa ứng dụng; thao tác đọc dùng khả năng đọc đồng thời của RocksDB.
+- Bộ đếm và audit event nằm trong cùng RocksDB nên được backup/restore và retention theo chính sách của kho sự kiện. Nếu cần audit chống can thiệp độc lập, cần chuyển audit sang hệ thống lưu trữ riêng.
 - Số liệu benchmark trong ghi chú nhóm cũ là từ máy khác. Báo cáo chỉ dùng số nhóm tự chạy, kèm cấu hình máy và điều kiện đo.
 
 ## Tài liệu trong dự án

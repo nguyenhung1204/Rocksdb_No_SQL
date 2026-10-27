@@ -7,7 +7,7 @@ Thiet ke tong quan (xem them trong bao cao):
   Column family "idx_level"   : index theo muc  key = level(1B) + event_id   value = rong
   Column family "idx_source"  : index theo nguon key = source + 0x00 + event_id   value = rong
   Column family "idx_trace"   : index theo trace key = trace_id + 0x00 + event_id  value = rong
-  Column family "meta"        : danh sach cac source da gap (de xoa theo retention)
+  Column family "meta"        : danh sach source va bo dem su kien ben vung
   Column family "users"       : tai khoan, password hash, vai tro va trang thai
 
 event_id = 8 byte timestamp (ms, big-endian) + 4 byte so thu tu (big-endian)
@@ -43,10 +43,51 @@ CF_INDEX_SOURCE = "idx_source"
 CF_INDEX_TRACE = "idx_trace"
 CF_META = "meta"
 CF_USERS = "users"
+META_COUNT_VERSION = b"\x00count:version"
+META_COUNT_TOTAL = b"\x00count:total"
+META_COUNT_LEVEL = b"\x00count:level:"
 
 ID_STRUCT = struct.Struct(">QI")  # 8 byte ts_ms + 4 byte seq
 ID_LEN = ID_STRUCT.size  # 12
 MIN_ID = ID_STRUCT.pack(0, 0)
+AUDIT_SOURCE = "audit-service"
+
+
+def is_internal_audit_event(event):
+    """Match only the canonical records produced by put_audit()."""
+    fields = event.get("fields") or {}
+    return (
+        event.get("source") == AUDIT_SOURCE
+        and fields.get("_audit") is True
+        and isinstance(fields.get("actor"), str)
+        and isinstance(fields.get("action"), str)
+        and isinstance(fields.get("status"), int)
+        and not isinstance(fields.get("status"), bool)
+    )
+
+
+class EventSnapshot:
+    """Streaming iterator pinned to one primary-column-family view."""
+
+    def __init__(self, db, total_count):
+        self.total_count = total_count
+        self._snapshot = db.snapshot()
+        self._iterator = self._snapshot.iter()
+        self._iterator.seek_to_last()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._iterator is None or not self._iterator.valid():
+            raise StopIteration
+        event = LogStore._decode(self._iterator.key(), self._iterator.value())
+        self._iterator.prev()
+        return event
+
+    def close(self):
+        self._iterator = None
+        self._snapshot = None
 
 
 def make_id(ts_ms, seq=0):
@@ -114,7 +155,7 @@ class LogStore:
         self._last_ts, self._last_seq = self._load_last_id()
         self._late_sequences = {}
         self._known_sources = set(self._load_sources())
-        self._known_traces = set(self._load_traces())
+        self._total_events, self._event_counts = self._load_event_counts()
 
     # ------------------------------------------------------------------ noi bo
     def _load_last_id(self):
@@ -129,21 +170,51 @@ class LogStore:
         it.seek_to_first()
         out = []
         while it.valid():
-            out.append(it.key().decode("utf-8"))
+            key = it.key()
+            if not key.startswith(b"\x00"):
+                out.append(key.decode("utf-8"))
             it.next()
         return out
 
-    def _load_traces(self):
-        it = self.cf_trace.iter()
+    def _load_event_counts(self):
+        if self.cf_meta.get(META_COUNT_VERSION) == b"1":
+            total = int(self.cf_meta.get(META_COUNT_TOTAL) or b"0")
+            counts = {
+                level: int(self.cf_meta.get(META_COUNT_LEVEL + level.encode("ascii")) or b"0")
+                for level in LEVELS
+            }
+            return total, counts
+
+        counts = dict.fromkeys(LEVELS, 0)
+        total = 0
+        it = self.db.iter()
         it.seek_to_first()
-        out = set()
         while it.valid():
-            key = it.key()
-            separator = key.find(b"\x00")
-            if separator >= 0:
-                out.add(key[:separator].decode("utf-8"))
+            record = json.loads(it.value().decode("utf-8"))
+            counts[record["level"]] += 1
+            total += 1
             it.next()
-        return out
+        wb = WriteBatch(raw_mode=True)
+        wb.put(META_COUNT_TOTAL, str(total).encode("ascii"), self.h_meta)
+        for level, count in counts.items():
+            wb.put(META_COUNT_LEVEL + level.encode("ascii"), str(count).encode("ascii"), self.h_meta)
+        wb.put(META_COUNT_VERSION, b"1", self.h_meta)
+        self.db.write(wb)
+        return total, counts
+
+    def _count_delta_batch(self, wb, total_delta, level_deltas):
+        updated_counts = self._event_counts.copy()
+        for level, delta in level_deltas.items():
+            updated_counts[level] += delta
+            if updated_counts[level] < 0:
+                raise RuntimeError("event count would become negative")
+            wb.put(META_COUNT_LEVEL + level.encode("ascii"),
+                   str(updated_counts[level]).encode("ascii"), self.h_meta)
+        updated_total = self._total_events + total_delta
+        if updated_total < 0:
+            raise RuntimeError("event count would become negative")
+        wb.put(META_COUNT_TOTAL, str(updated_total).encode("ascii"), self.h_meta)
+        return updated_total, updated_counts
 
     def _next_id(self, ts_ms):
         """Tao ID theo timestamp su kien; log den tre van giu dung thoi diem."""
@@ -202,26 +273,43 @@ class LogStore:
         Ghi nhieu su kien trong 1 WriteBatch => nguyen tu: hoac ghi het
         (du lieu + cac index) hoac khong ghi gi. events: list (level, source, msg, fields, ts_ms)
         """
+        return self._write_events(events)
+
+    def put_audit(self, actor, action, target=None, status=200):
+        """Append an immutable web action record to the normal event stream."""
+        fields = {"_audit": True, "actor": actor, "action": action, "status": status}
+        if target:
+            fields["target"] = str(target)[:256]
+        event = ("INFO", AUDIT_SOURCE, "%s %s" % (actor, action), fields, None)
+        return self._write_events([event], allow_audit=True)[0]
+
+    def _write_events(self, events, allow_audit=False):
         ids = []
         wb = WriteBatch(raw_mode=True)
         new_sources = set()
-        new_traces = set()
+        level_deltas = dict.fromkeys(LEVELS, 0)
         with self._lock:
             for level, source, msg, fields, ts_ms in events:
                 self._check_event(level, source, msg, fields)
+                event = {"source": source, "fields": fields}
+                if is_internal_audit_event(event) and not allow_audit:
+                    raise ValueError("_audit is reserved for system audit records")
+                if allow_audit and not is_internal_audit_event(event):
+                    raise ValueError("invalid system audit record")
                 if ts_ms is None:
                     ts_ms = int(time.time() * 1000)
                 event_id, _ = self._next_id(ts_ms)
                 self._add_to_batch(wb, event_id, level, source, msg, fields)
                 if source not in self._known_sources:
                     new_sources.add(source)
-                trace_id = (fields or {}).get("trace_id")
-                if trace_id:
-                    new_traces.add(trace_id)
+                level_deltas[level] += 1
                 ids.append(event_id)
+            if not ids:
+                return []
+            updated_total, updated_counts = self._count_delta_batch(wb, len(ids), level_deltas)
             self.db.write(wb)
             self._known_sources |= new_sources
-            self._known_traces |= new_traces
+            self._total_events, self._event_counts = updated_total, updated_counts
         return ids
 
     # --------------------------------------------------------------------- doc
@@ -279,8 +367,14 @@ class LogStore:
         for k, _ in self._scan(cf, prefix + lo_id, prefix + hi_id, reverse):
             yield k[n:]
 
+    def snapshot_events(self):
+        """Mo iterator su kien streamable, nhat quan tu thoi diem tao snapshot."""
+        with self._lock:
+            return EventSnapshot(self.db, self._total_events)
+
     def query(self, start_ms=None, end_ms=None, level=None, source=None,
-              contains=None, limit=100, reverse=True, trace_id=None):
+              contains=None, limit=100, reverse=True, trace_id=None,
+              before_id=None, after_id=None):
         """
         Truy van su kien.
           start_ms, end_ms : khoang thoi gian [start, end] (ms), None = khong gioi han
@@ -295,9 +389,18 @@ class LogStore:
             raise ValueError("limit khong duoc am")
         if limit == 0:
             return []
+        if before_id and after_id:
+            raise ValueError("before_id va after_id khong the dung cung luc")
 
         lo = make_id(max(start_ms, 0) if start_ms is not None else 0, 0)
         hi = make_id((end_ms + 1) if end_ms is not None else 0xFFFFFFFFFFFFFFF, 0)
+        if before_id:
+            hi = min(hi, self._validate_cursor(before_id))
+        elif after_id:
+            cursor = self._validate_cursor(after_id)
+            lo = max(lo, (int.from_bytes(cursor, "big") + 1).to_bytes(ID_LEN, "big"))
+        if lo >= hi:
+            return []
         min_level = LEVEL_NUM[level] if level else 0
 
         if source:
@@ -336,6 +439,18 @@ class LogStore:
                 break
         return out
 
+    @staticmethod
+    def _validate_cursor(cursor):
+        if isinstance(cursor, bytes) and len(cursor) == ID_LEN:
+            return cursor
+        try:
+            event_id = bytes.fromhex(cursor)
+        except (TypeError, ValueError):
+            raise ValueError("cursor phai la event ID hex hop le")
+        if len(event_id) != ID_LEN:
+            raise ValueError("cursor phai la event ID hex hop le")
+        return event_id
+
     def update_event(self, event_id, *, level=None, source=None, msg=None, fields=None):
         """Cap nhat mot su kien, giu nguyen ID va dong bo cac index trong WriteBatch."""
         if len(event_id) != ID_LEN:
@@ -350,19 +465,26 @@ class LogStore:
             msg = old["msg"] if msg is None else msg
             fields = old["fields"] if fields is None else fields
             self._check_event(level, source, msg, fields)
+            if is_internal_audit_event(old):
+                raise ValueError("khong the sua audit event")
+            if is_internal_audit_event({"source": source, "fields": fields}):
+                raise ValueError("_audit is reserved for system audit records")
 
             wb = WriteBatch(raw_mode=True)
             old_trace = old["fields"].get("trace_id")
-            new_trace = fields.get("trace_id")
             wb.delete(bytes([LEVEL_NUM[old["level"]]]) + event_id, self.h_level)
             wb.delete(old["source"].encode("utf-8") + b"\x00" + event_id, self.h_source)
             if old_trace:
                 wb.delete(old_trace.encode("utf-8") + b"\x00" + event_id, self.h_trace)
             self._add_to_batch(wb, event_id, level, source, msg, fields)
+            level_deltas = dict.fromkeys(LEVELS, 0)
+            if old["level"] != level:
+                level_deltas[old["level"]] -= 1
+                level_deltas[level] += 1
+            updated_total, updated_counts = self._count_delta_batch(wb, 0, level_deltas)
             self.db.write(wb)
+            self._total_events, self._event_counts = updated_total, updated_counts
             self._known_sources.add(source)
-            if new_trace:
-                self._known_traces.add(new_trace)
             return self._decode(event_id, self.db.get(event_id))
 
     def delete_event(self, event_id):
@@ -374,6 +496,8 @@ class LogStore:
             if raw is None:
                 return False
             old = self._decode(event_id, raw)
+            if is_internal_audit_event(old):
+                raise ValueError("khong the xoa audit event")
             wb = WriteBatch(raw_mode=True)
             wb.delete(event_id, self.h_default)
             wb.delete(bytes([LEVEL_NUM[old["level"]]]) + event_id, self.h_level)
@@ -381,7 +505,9 @@ class LogStore:
             trace_id = old["fields"].get("trace_id")
             if trace_id:
                 wb.delete(trace_id.encode("utf-8") + b"\x00" + event_id, self.h_trace)
+            updated_total, updated_counts = self._count_delta_batch(wb, -1, {old["level"]: -1})
             self.db.write(wb)
+            self._total_events, self._event_counts = updated_total, updated_counts
             return True
 
     # ------------------------------------------------------------- tai khoan
@@ -422,7 +548,9 @@ class LogStore:
         return exists
 
     def count(self, start_ms=None, end_ms=None, level_exact=None):
-        """Dem so su kien (quet index, khong doc value)."""
+        """Dem su kien tong truc tiep; truy van theo khoang quet index."""
+        if start_ms is None and end_ms is None:
+            return self._event_counts[level_exact] if level_exact else self._total_events
         lo = make_id(start_ms or 0, 0)
         hi = make_id((end_ms + 1) if end_ms is not None else 0xFFFFFFFFFFFFFFF, 0)
         if level_exact:
@@ -433,10 +561,13 @@ class LogStore:
         return sum(1 for _ in self._scan(cf, lo, hi))
 
     def count_by_level(self, start_ms=None, end_ms=None):
+        if start_ms is None and end_ms is None:
+            return self._event_counts.copy()
         return {lv: self.count(start_ms, end_ms, lv) for lv in LEVELS}
 
     def sources(self):
-        return sorted(self._known_sources)
+        with self._lock:
+            return sorted(self._known_sources)
 
     # ------------------------------------------------------------- retention
     def purge_older_than(self, cutoff_ms, compact=False):
@@ -447,9 +578,22 @@ class LogStore:
         Tra ve so su kien da xoa.
         """
         cutoff = make_id(cutoff_ms, 0)
-        deleted = self.count(end_ms=cutoff_ms - 1) if cutoff_ms > 0 else 0
-        wb = WriteBatch(raw_mode=True)
         with self._lock:
+            deleted_by_level = dict.fromkeys(LEVELS, 0)
+            deleted = 0
+            it = self.db.iter()
+            it.seek_to_first()
+            while it.valid() and it.key() < cutoff:
+                record = json.loads(it.value().decode("utf-8"))
+                deleted_by_level[record["level"]] += 1
+                deleted += 1
+                it.next()
+            if not deleted:
+                if compact:
+                    self.compact()
+                return 0
+
+            wb = WriteBatch(raw_mode=True)
             wb.delete_range(MIN_ID, cutoff, self.h_default)
             for lv in range(len(LEVELS)):
                 p = bytes([lv])
@@ -457,13 +601,37 @@ class LogStore:
             for src in self._known_sources:
                 p = src.encode("utf-8") + b"\x00"
                 wb.delete_range(p + MIN_ID, p + cutoff, self.h_source)
-            for trace_id in self._known_traces:
-                p = trace_id.encode("utf-8") + b"\x00"
-                wb.delete_range(p + MIN_ID, p + cutoff, self.h_trace)
+            level_deltas = {level: -count for level, count in deleted_by_level.items() if count}
+            updated_total, updated_counts = self._count_delta_batch(wb, -deleted, level_deltas)
             self.db.write(wb)
+            self._total_events, self._event_counts = updated_total, updated_counts
+            self._delete_expired_trace_ranges(cutoff)
         if compact:
             self.compact()
         return deleted
+
+    def _delete_expired_trace_ranges(self, cutoff):
+        it = self.cf_trace.iter()
+        it.seek_to_first()
+        batch = WriteBatch(raw_mode=True)
+        ranges = 0
+        while it.valid():
+            key = it.key()
+            separator = key.find(b"\x00")
+            if separator < 0 or len(key) - separator - 1 != ID_LEN:
+                it.next()
+                continue
+            prefix = key[:separator + 1]
+            if key[separator + 1:] < cutoff:
+                batch.delete_range(prefix + MIN_ID, prefix + cutoff, self.h_trace)
+                ranges += 1
+                if ranges >= 1000:
+                    self.db.write(batch)
+                    batch = WriteBatch(raw_mode=True)
+                    ranges = 0
+            it.seek(prefix + b"\xff" * (ID_LEN + 1))
+        if ranges:
+            self.db.write(batch)
 
     # --------------------------------------------------------------- bao tri
     def flush(self):

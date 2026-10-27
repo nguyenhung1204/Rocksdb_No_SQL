@@ -112,7 +112,7 @@ Luôn chạy trong thư mục gốc dự án, nơi có `app.py`. Trong các ví 
 | Restore | `python cli.py restore backups/b1 data/restored-db` | Tạo DB mới từ checkpoint; thư mục đích phải chưa tồn tại |
 | Web demo | `python app.py` rồi mở `http://127.0.0.1:5000` | Tạo admin, nạp 4 hồ sơ giả lập và 32 log theo 5 trace nghiệp vụ |
 | Seed mẫu ngoại tuyến | `python cli.py --db data/webdb seed-demo --password "mat-khau-tam-demo"` | Cần admin hoạt động; phải dừng web trước khi dùng CLI |
-| Benchmark | `python bench.py --n 200000 --json ketqua.json` | Bảng so sánh |
+| Benchmark | `python bench.py --n 200000 --write-repeat 3 --repeat 30 --json ketqua.json` | Bảng so sánh, gồm p50/p95/p99 |
 
 Web và REST API yêu cầu đăng nhập; các thao tác ghi cần CSRF token. Khi trình diễn, dùng giao diện web hoặc gửi yêu cầu từ phiên đăng nhập của trình duyệt. CLI là cách gọn hơn để chạy các thao tác quản trị ngoại tuyến.
 
@@ -133,7 +133,7 @@ Web và REST API yêu cầu đăng nhập; các thao tác ghi cần CSRF token. 
 | `idx_level` | `level(1B) + event_id` | rỗng | Truy vấn theo mức độ |
 | `idx_source` | `source + 0x00 + event_id` | rỗng | Truy vấn theo nguồn |
 | `idx_trace` | `trace_id + 0x00 + event_id` | rỗng | Truy vấn theo trace |
-| `meta` | `source` | `1` | Danh sách nguồn (phục vụ xóa theo retention) |
+| `meta` | `source`, `\x00count:*` | `1`, bộ đếm | Danh sách nguồn và số lượng sự kiện bền vững |
 | `users` | tên đăng nhập chuẩn hóa | JSON chứa password hash, role, trạng thái | Tài khoản demo |
 
 ### 6.2 event_id = 8 byte timestamp (ms, big-endian) + 4 byte seq
@@ -148,7 +148,8 @@ Mỗi sự kiện ghi vào bản ghi chính và các index theo mức, nguồn, 
 - Khoảng thời gian: `seek(lo)` rồi `next()` đến khi key ≥ `hi`.
 - Lọc `level ≥ X`: duyệt index của từng mức ≥ X rồi **gộp theo id** bằng `heapq.merge` (mỗi luồng đã sắp xếp sẵn).
 - Lọc nguồn: duyệt `idx_source` theo tiền tố.
-- Lọc trace: duyệt `idx_trace` theo tiền tố.
+- Lọc trace: duyệt `idx_trace` theo tiền tố. Retention xóa trace range theo từng batch, không giữ mọi trace ID trong Python set.
+- Phân trang: `cursor` là event ID loại trừ của trang vừa xem; API trả `has_more` và `next_cursor`, giao diện có nút trang trước/sau.
 - `--contains` (tìm chuỗi trong nội dung): **không có index**, phải duyệt và lọc → chậm hơn nhiều. Đây là hạn chế thật của KV store, nêu thẳng trong báo cáo (giải pháp: thêm inverted index hoặc dùng công cụ tìm kiếm chuyên dụng).
 
 ### 6.5 Retention bằng DeleteRange
@@ -167,10 +168,11 @@ LZ4 compression (giảm dung lượng, tốn ít CPU), Bloom filter 10 bit/key (
 Nhóm có thể tự mở rộng thêm sau khi hoàn thành demo:
 1. **Đổi bối cảnh dữ liệu** cho sát đề tài: tên service, mẫu thông báo trong `logstore/gen.py`.
 2. **TTL tự động**: tác vụ chạy `purge_older_than` theo lịch và ghi nhật ký thao tác quản trị.
-3. **Phân trang bằng con trỏ** (`cursor = event_id cuối`) thay cho `limit`.
-4. **Thống kê theo phút** (số ERROR mỗi phút) bằng cách quét range hoặc lưu bộ đếm.
-5. **So sánh option**: bật/tắt LZ4, Bloom filter, đổi kích thước memtable rồi đo dung lượng và tốc độ.
-6. **Ghi `sync=True`** và đo chi phí độ bền (`python cli.py --sync gen ...`).
+3. **Thống kê theo phút** (số ERROR mỗi phút) bằng cách quét range hoặc lưu bộ đếm theo thời gian.
+4. **So sánh option**: bật/tắt LZ4, Bloom filter, đổi kích thước memtable rồi đo dung lượng và tốc độ.
+5. **Ghi `sync=True`** và đo chi phí độ bền (`python cli.py --sync gen ...`).
+6. **Mở rộng thu thập log**: dùng `POST /api/ingest` với Bearer token; ví dụ client có ở `examples/emit_logs.py`.
+7. **Tách audit store** nếu đồ án được mở rộng thành hệ thống vận hành thật cần audit không bị rollback theo checkpoint/retention của log.
 
 ---
 
