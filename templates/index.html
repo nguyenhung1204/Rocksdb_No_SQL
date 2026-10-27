@@ -1,90 +1,147 @@
 {% extends "base.html" %}
-{% block title %}LogStore · Bảng điều khiển{% endblock %}
+{% set active_page = 'events' %}
+{% block title %}Sự kiện · LogStore{% endblock %}
 {% block content %}
-<main>
-  <section class="section">
-    <h2>Tình trạng cơ sở dữ liệu</h2>
-    <div id="stats" class="stats" aria-live="polite"></div>
-    <div class="table-wrap"><table style="min-width:620px">
-      <thead><tr><th>Column family</th><th>Số key ước tính</th><th>SST</th><th>Memtable</th><th>File L0</th></tr></thead>
-      <tbody id="columnFamilies"></tbody>
-    </table></div>
-    <p id="dbPath" class="muted"></p>
+<main class="page">
+  <header class="titlerow">
+    <div>
+      <h1>Sự kiện</h1>
+      <p class="subline" id="finding" aria-live="polite">Đang đọc thống kê…</p>
+    </div>
+    <div class="titleactions">
+      <span class="muted small num" id="freshness"></span>
+      <button type="button" id="refreshButton">Làm mới</button>
+    </div>
+  </header>
+
+  <section class="kpis" id="stats" aria-label="Tình trạng cơ sở dữ liệu">
+    <div class="kpi lead"><div class="label">ERROR và FATAL · 60 phút</div><div class="value"><span class="skeleton"></span></div></div>
+    <div class="kpi"><div class="label">Tổng sự kiện</div><div class="value"><span class="skeleton"></span></div></div>
+    <div class="kpi"><div class="label">Nguồn log</div><div class="value"><span class="skeleton"></span></div></div>
+    <div class="kpi"><div class="label">Dung lượng trên đĩa</div><div class="value"><span class="skeleton"></span></div></div>
   </section>
 
-  {% if user.role in ['admin', 'operator'] %}
-  <section class="section">
-    <h2>Quản lý và trao đổi dữ liệu</h2>
-    <div class="row">
-      <label>Số sự kiện mẫu<input id="simN" type="number" value="5000" min="1" max="200000" style="width:145px"></label>
-      <button class="secondary" id="simulateButton">Sinh dữ liệu mẫu</button>
-      <label>Lưu log (giờ)<input id="purgeHours" type="number" value="24" min="1" max="87600" style="width:120px"></label>
-      <button class="danger" id="purgeButton">Xóa log cũ</button>
-      <button class="secondary" id="exportButton">Xuất JSONL</button>
-      <label>Nhập JSONL<input id="importFile" type="file" accept=".jsonl,.ndjson,application/json"></label>
-      <button class="secondary" id="importButton">Nhập tệp</button>
-    </div>
-    <div class="row" style="margin-top:12px">
-      <button id="backupButton">Tạo bản sao lưu</button>
-      <label>Bản sao lưu<select id="backupSelect" style="min-width:260px"><option value="">Chọn bản sao lưu</option></select></label>
-      {% if user.role == 'admin' %}<button class="secondary" id="restoreButton">Khôi phục bản sao lưu</button>{% endif %}
-    </div>
-    <div id="maintenanceStatus" class="status" role="status"></div>
-    <p class="muted">Khôi phục tạo thư mục dữ liệu mới rồi chuyển ứng dụng sang bản sao đó. Bản sao lưu cũ vẫn được giữ.</p>
-  </section>
-  <section class="section">
-    <h2>Ghi sự kiện</h2>
-    <form id="eventForm" class="row">
-      <label>Mức<select id="writeLevel">{% for level in levels %}<option {{ 'selected' if level == 'INFO' }}>{{ level }}</option>{% endfor %}</select></label>
-      <label>Nguồn<input id="writeSource" value="demo-app" maxlength="128" required></label>
-      <label>Nội dung<input id="writeMessage" value="Sự kiện minh họa RocksDB" maxlength="2000" style="min-width:260px" required></label>
-      <label>Trace ID<input id="writeTrace" maxlength="256" placeholder="trace-001"></label>
-      <button type="submit">Ghi sự kiện</button>
-    </form>
-    <div id="writeStatus" class="status" role="status"></div>
-  </section>
-  {% endif %}
+  <div class="workspace">
+    <section class="panel" aria-labelledby="eventsTitle">
+      <div class="panel-head">
+        <h2 id="eventsTitle">Tra cứu sự kiện</h2>
+        <span id="queryStatus" class="status small num" role="status"></span>
+      </div>
+      <div class="panel-body">
+        <form id="queryForm" class="fields">
+          <label>Trace ID<input id="queryTrace" class="w-trace" maxlength="256" placeholder="DEMO-ORDER-001"></label>
+          <label class="more">Từ khóa trong nội dung<input id="queryText" class="w-text" maxlength="500" placeholder="timeout"></label>
+          <label class="more">Khoảng thời gian<select id="lastMinutes">
+            <option value="15">15 phút gần nhất</option><option value="60" selected>1 giờ gần nhất</option>
+            <option value="360">6 giờ gần nhất</option><option value="1440">24 giờ gần nhất</option><option value="">Tất cả</option>
+          </select></label>
+          <label class="more">Mức tối thiểu<select id="queryLevel"><option value="">Tất cả</option>{% for level in levels %}<option>{{ level }}</option>{% endfor %}</select></label>
+          <label class="more">Nguồn<select id="querySource" style="max-width:200px"><option value="">Tất cả</option></select></label>
+          <label class="more">Số dòng<input id="queryLimit" class="w-limit" type="number" value="50" min="1" max="1000"></label>
+          <label class="check more"><input id="hideAudit" type="checkbox" checked>Ẩn nhật ký kiểm toán</label>
+          <button type="button" id="moreFilters" class="phone-only" aria-expanded="false">Bộ lọc khác</button>
+          <button type="submit" class="primary" id="searchButton">Tìm kiếm</button>
+        </form>
+        <p class="hint">Khi có Trace ID, kết quả gồm toàn bộ thời gian của trace. Bấm một Trace ID trong bảng để xem cả luồng.</p>
+      </div>
+      <div class="table-wrap">
+        <table class="events-table">
+          <thead><tr><th>Thời gian</th><th>Mức</th><th>Nguồn</th><th>Trace ID</th><th>Nội dung</th><th class="num"><span class="sr-only">Thao tác</span></th></tr></thead>
+          <tbody id="events"><tr><td colspan="6" class="empty muted">Đang tải sự kiện…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="panel-body" style="display:flex;justify-content:flex-end;gap:8px">
+        <button type="button" id="previousPage" disabled>Trang trước</button>
+        <button type="button" id="nextPage" disabled>Trang tiếp</button>
+      </div>
+    </section>
 
-  <section class="section">
-    <h2>Tra cứu sự kiện</h2>
-    <form id="queryForm" class="row">
-      <label>Khoảng thời gian<select id="lastMinutes">
-        <option value="15">15 phút gần nhất</option><option value="60" selected>1 giờ gần nhất</option>
-        <option value="360">6 giờ gần nhất</option><option value="1440">24 giờ gần nhất</option><option value="">Tất cả</option>
-      </select></label>
-      <label>Mức tối thiểu<select id="queryLevel"><option value="">Tất cả</option>{% for level in levels %}<option>{{ level }}</option>{% endfor %}</select></label>
-      <label>Nguồn<select id="querySource"><option value="">Tất cả</option></select></label>
-      <label>Trace ID<input id="queryTrace" maxlength="256" placeholder="trace-001"></label>
-      <label>Từ khóa trong nội dung<input id="queryText" maxlength="500" placeholder="timeout"></label>
-      <label>Số kết quả<input id="queryLimit" type="number" value="50" min="1" max="1000" style="width:100px"></label>
-      <label class="check"><input id="hideAudit" type="checkbox" checked>Ẩn nhật ký kiểm toán</label>
-      <button type="submit" id="searchButton">Tìm kiếm</button>
-    </form>
-    <div id="queryStatus" class="status" role="status"></div>
-    <p class="muted">Khi nhập Trace ID, hệ thống tìm toàn bộ thời gian của trace đó. Bấm Trace ID trong bảng để xem cả luồng.</p>
-    <div class="row"><button type="button" class="secondary" id="previousPage" disabled>Trang trước</button><button type="button" class="secondary" id="nextPage" disabled>Trang tiếp</button></div>
-    <div class="table-wrap"><table>
-      <thead><tr><th>Thời gian</th><th>Mức</th><th>Nguồn</th><th>Trace ID</th><th>Nội dung</th><th>Thao tác</th></tr></thead>
-      <tbody id="events"></tbody>
-    </table></div>
-  </section>
+    <div class="rail">
+      {% if user.role in ['admin', 'operator'] %}
+      <section class="panel" aria-labelledby="writeTitle">
+        <div class="panel-head"><h2 id="writeTitle">Ghi sự kiện</h2></div>
+        <form id="eventForm" class="panel-body stack">
+          <div class="fields">
+            <label style="flex:0 0 110px">Mức<select id="writeLevel">{% for level in levels %}<option {{ 'selected' if level == 'INFO' }}>{{ level }}</option>{% endfor %}</select></label>
+            <label style="flex:1 1 140px">Nguồn<input id="writeSource" value="demo-app" maxlength="128" required style="width:100%"></label>
+          </div>
+          <label>Nội dung<input id="writeMessage" value="Sự kiện minh họa RocksDB" maxlength="2000" required></label>
+          <label>Trace ID<input id="writeTrace" maxlength="256" placeholder="trace-001"></label>
+          <div><button type="submit">Ghi vào RocksDB</button></div>
+          <div id="writeStatus" class="status small" role="status"></div>
+        </form>
+      </section>
+
+      <section class="panel" aria-labelledby="dataTitle">
+        <div class="panel-head"><h2 id="dataTitle">Dữ liệu và sao lưu</h2></div>
+        <div class="panel-body">
+          <div class="group">
+            <h3>Checkpoint</h3>
+            <div class="fields">
+              <button type="button" id="backupButton">Tạo bản sao lưu</button>
+            </div>
+            <label>Bản sao lưu<select id="backupSelect" style="width:100%"><option value="">Chọn bản sao lưu</option></select></label>
+            {% if user.role == 'admin' %}<div><button type="button" class="danger" id="restoreButton">Khôi phục bản sao lưu</button></div>{% endif %}
+            <p class="hint">Khôi phục mở một thư mục DB mới từ checkpoint; bản sao lưu cũ vẫn được giữ.</p>
+          </div>
+          <div class="group">
+            <h3>JSONL</h3>
+            <div class="fields"><button type="button" id="exportButton">Xuất JSONL</button></div>
+            <label>Tệp để nhập<input id="importFile" type="file" accept=".jsonl,.ndjson,application/json" style="width:100%"></label>
+            <div><button type="button" id="importButton">Nhập tệp</button></div>
+          </div>
+          <div class="group">
+            <h3>Dữ liệu mẫu</h3>
+            <div class="fields">
+              <label style="flex:1 1 120px">Số sự kiện<input id="simN" type="number" value="5000" min="1" max="200000" style="width:100%"></label>
+              <button type="button" id="simulateButton">Sinh trong 1 giờ qua</button>
+            </div>
+          </div>
+          <div class="group">
+            <h3>Retention</h3>
+            <div class="fields">
+              <label style="flex:1 1 120px">Giữ lại (giờ)<input id="purgeHours" type="number" value="24" min="1" max="87600" style="width:100%"></label>
+              <button type="button" class="danger" id="purgeButton">Xóa log cũ hơn</button>
+            </div>
+          </div>
+          <div id="maintenanceStatus" class="status small" role="status"></div>
+        </div>
+      </section>
+      {% endif %}
+
+      <section class="panel" aria-labelledby="layoutTitle">
+        <div class="panel-head"><h2 id="layoutTitle">Bố cục RocksDB</h2><span class="small muted">số key</span></div>
+        <div class="panel-body">
+          <p class="hint">Mỗi sự kiện là một bản ghi trong <code>default</code> và một khóa ở <code>idx_level</code>, <code>idx_source</code>, <code>idx_trace</code>, ghi cùng một WriteBatch.</p>
+          <ul class="cf-list" id="columnFamilies"><li class="muted">Đang đọc…</li></ul>
+          <p id="dbPath" class="hint mono" style="overflow-wrap:anywhere"></p>
+        </div>
+      </section>
+    </div>
+  </div>
 </main>
-<dialog id="detailDialog">
-  <h2>Chi tiết sự kiện</h2>
+
+<dialog id="detailDialog" aria-labelledby="detailTitle">
+  <h2 id="detailTitle">Chi tiết sự kiện</h2>
   <dl id="detailBody" class="detail"></dl>
-  <div class="row"><button class="secondary" type="button" id="detailTrace">Xem cả trace</button><button class="secondary" type="button" id="closeDetail">Đóng</button></div>
+  <div class="dialog-actions">
+    <button type="button" class="danger" id="detailDelete" hidden>Xóa</button>
+    <button type="button" id="detailEdit" hidden>Sửa</button>
+    <button type="button" id="detailTrace">Xem cả trace</button>
+    <button type="button" class="primary" id="closeDetail">Đóng</button>
+  </div>
 </dialog>
 {% if user.role in ['admin', 'operator'] %}
-<dialog id="editDialog">
-  <h2>Sửa sự kiện</h2>
-  <form id="editForm">
+<dialog id="editDialog" aria-labelledby="editTitle">
+  <h2 id="editTitle">Sửa sự kiện</h2>
+  <form id="editForm" class="stack">
     <input id="editId" type="hidden">
     <label>Mức<select id="editLevel">{% for level in levels %}<option>{{ level }}</option>{% endfor %}</select></label>
-    <label style="margin-top:8px">Nguồn<input id="editSource" required maxlength="128"></label>
-    <label style="margin-top:8px">Nội dung<textarea id="editMessage" rows="3" required maxlength="2000" style="width:100%"></textarea></label>
-    <label style="margin-top:8px">Fields dạng JSON<textarea id="editFields" rows="4" style="width:100%;font-family:Consolas,monospace"></textarea></label>
+    <label>Nguồn<input id="editSource" required maxlength="128"></label>
+    <label>Nội dung<textarea id="editMessage" rows="3" required maxlength="2000"></textarea></label>
+    <label>Fields dạng JSON<textarea id="editFields" rows="5" style="font-family:var(--mono);font-size:13px"></textarea></label>
     <p id="editError" class="error" role="alert"></p>
-    <div class="row"><button type="submit">Lưu thay đổi</button><button class="secondary" type="button" id="cancelEdit">Đóng</button></div>
+    <div class="dialog-actions"><button type="button" id="cancelEdit">Đóng</button><button type="submit" class="primary">Lưu thay đổi</button></div>
   </form>
 </dialog>
 {% endif %}
@@ -97,8 +154,13 @@ const canWrite = role === 'admin' || role === 'operator';
 const $ = id => document.getElementById(id);
 let pageCursors=[null], pageIndex=0, nextPageCursor=null;
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const fmtBytes = value => value < 1024 ? value + ' B' : value < 1048576 ? (value/1024).toFixed(1) + ' KB' : (value/1048576).toFixed(1) + ' MB';
+const fmtInt = value => Number(value).toLocaleString('vi-VN');
+const fmtDec = value => value.toLocaleString('vi-VN', {minimumFractionDigits:1, maximumFractionDigits:1});
+const fmtBytes = value => value < 1024 ? value + ' B' : value < 1000*1024 ? fmtDec(value/1024) + ' KB' : fmtDec(value/1048576) + ' MB';
 const fmtTime = ms => new Date(ms).toLocaleString('vi-VN');
+const fmtClock = ms => new Date(ms).toLocaleTimeString('vi-VN');
+const fmtDay = ms => new Date(ms).toLocaleDateString('vi-VN');
+const sizeParts = value => { const text=fmtBytes(value), i=text.lastIndexOf(' '); return [text.slice(0,i), text.slice(i+1)]; };
 
 async function api(path, options={}) {
   const headers = {...(options.headers || {})};
@@ -113,22 +175,53 @@ async function api(path, options={}) {
   return body;
 }
 function setStatus(id, message, kind) {
-  const element=$(id); element.textContent=message; element.className='status'+(kind?' '+kind:'');
+  const element=$(id); element.textContent=message; element.className='status small'+(kind?' '+kind:'');
 }
 const isAudit = event => event.source==='audit-service' && (event.fields||{})._audit===true;
 let lastEvents=[];
+
+function kpi(label, value, unit, extra='', note='') {
+  return '<div class="kpi '+extra+'"><div class="label">'+label+'</div><div class="value">'+esc(value)+
+    (unit?'<small>'+esc(unit)+'</small>':'')+'</div>'+(note?'<div class="note">'+note+'</div>':'')+'</div>';
+}
 async function loadStats() {
   const result = await api('/api/stats');
-  const totals = [['Tổng sự kiện',result.total_events],['Dung lượng RocksDB',fmtBytes(result.disk_bytes)],
-    ['Nguồn log',result.sources.length],['ERROR + FATAL trong 1 giờ',result.by_level_last_hour.ERROR + result.by_level_last_hour.FATAL]];
-  $('stats').innerHTML = totals.map(item => '<div class="stat"><strong>'+esc(item[1])+'</strong><span>'+item[0]+'</span></div>').join('');
-  $('columnFamilies').innerHTML = Object.entries(result.column_families).map(item => {
-    const cf=item[1]; return '<tr><td>'+esc(item[0])+'</td><td>'+esc(cf.estimate_num_keys)+'</td><td>'+fmtBytes(cf.sst_size_bytes)+'</td><td>'+fmtBytes(cf.memtable_bytes)+'</td><td>'+esc(cf.l0_files)+'</td></tr>';
-  }).join('');
-  $('dbPath').textContent = 'Thư mục DB đang dùng: ' + result.path;
+  const recent = result.by_level_last_hour, errors = recent.ERROR + recent.FATAL;
+  const size = sizeParts(result.disk_bytes);
+  $('stats').innerHTML =
+    kpi('ERROR và FATAL · 60 phút', fmtInt(errors), '', 'lead'+(errors?' alert':''), 'WARN: '+fmtInt(recent.WARN)+' · FATAL: '+fmtInt(recent.FATAL)) +
+    kpi('Tổng sự kiện', fmtInt(result.total_events), '', '', 'ERROR: '+fmtInt(result.by_level.ERROR)+' · FATAL: '+fmtInt(result.by_level.FATAL)) +
+    kpi('Nguồn log', fmtInt(result.sources.length), '', '', 'Danh mục trong column family meta') +
+    kpi('Dung lượng trên đĩa', size[0], ' '+size[1], '', 'Đã nén LZ4, gồm WAL và SST');
+  const families = Object.entries(result.column_families);
+  const most = Math.max(1, ...families.map(item => item[1].estimate_num_keys));
+  $('columnFamilies').innerHTML = families.map(([name, cf]) =>
+    '<li class="cf-row"><span class="name">'+esc(name)+'</span><span class="keys num">'+fmtInt(cf.estimate_num_keys)+'</span>'+
+    '<span class="cf-bar"><i style="width:'+(cf.estimate_num_keys/most*100).toFixed(1)+'%"></i></span>'+
+    '<span class="meta num">SST '+fmtBytes(cf.sst_size_bytes)+' · memtable '+fmtBytes(cf.memtable_bytes)+' · L0 '+fmtInt(cf.l0_files)+' tệp</span></li>').join('');
+  $('dbPath').textContent = result.path;
   const select=$('querySource'), selected=select.value;
   select.innerHTML='<option value="">Tất cả</option>'+result.sources.map(s=>'<option value="'+esc(s)+'">'+esc(s)+'</option>').join('');
   select.value=selected;
+  await loadFinding(errors);
+  $('freshness').textContent = 'Cập nhật ' + fmtClock(Date.now());
+}
+async function loadFinding(errors) {
+  if (!errors) { $('finding').textContent = 'Không có sự kiện ERROR hoặc FATAL trong 60 phút qua.'; return; }
+  let top = '';
+  try {
+    const recent = await api('/api/events?last_minutes=60&level=ERROR&hide_audit=1&limit=1000');
+    const bySource = {};
+    recent.events.filter(e => e.level==='ERROR' || e.level==='FATAL').forEach(e => { bySource[e.source]=(bySource[e.source]||0)+1; });
+    const best = Object.entries(bySource).sort((a,b)=>b[1]-a[1])[0];
+    if (best) top = ', nhiều nhất từ <strong>'+esc(best[0])+'</strong> ('+fmtInt(best[1])+')';
+  } catch (_error) { /* finding keeps the count only */ }
+  $('finding').innerHTML = '<strong>'+fmtInt(errors)+' sự kiện ERROR hoặc FATAL</strong> trong 60 phút qua'+top+
+    '. <button type="button" class="textlink" id="showErrors">Xem các lỗi này</button>';
+  $('showErrors').addEventListener('click', () => {
+    $('queryTrace').value=''; $('queryText').value=''; $('querySource').value='';
+    $('lastMinutes').value='60'; $('queryLevel').value='ERROR'; runQuery(true);
+  });
 }
 async function runQuery(reset=false) {
   if (reset) { pageCursors=[null]; pageIndex=0; }
@@ -147,19 +240,20 @@ async function runQuery(reset=false) {
   try {
     const result=await api('/api/events?'+params.toString());
     nextPageCursor=result.next_cursor; lastEvents=result.events;
-    setStatus('queryStatus',result.count+' kết quả · '+result.took_ms+' ms'+(trace?' · toàn bộ thời gian của trace':'')+(result.has_more?' · còn trang sau':''));
+    setStatus('queryStatus',fmtInt(result.count)+' kết quả · '+result.took_ms.toLocaleString('vi-VN',{maximumFractionDigits:2})+' ms'+(trace?' · toàn bộ thời gian của trace':'')+(result.has_more?' · còn trang sau':''));
     $('previousPage').disabled=pageIndex===0;
     $('nextPage').disabled=!result.has_more;
     if (!result.events.length) {
-      $('events').innerHTML='<tr><td colspan="6" class="empty">Không có sự kiện phù hợp. Thử chọn "Tất cả" ở khoảng thời gian hoặc bỏ bớt bộ lọc.</td></tr>';
+      $('events').innerHTML='<tr><td colspan="6" class="empty"><div class="empty-box">Không có sự kiện phù hợp. Thử chọn "Tất cả" ở khoảng thời gian hoặc bỏ bớt bộ lọc.</div></td></tr>';
       return;
     }
     $('events').innerHTML=result.events.map((event,index)=>{
       const trace=(event.fields||{}).trace_id||'';
-      const actions='<button class="secondary" data-detail="'+index+'">Chi tiết</button>'+
-        (canWrite&&!isAudit(event)?'<button class="secondary" data-edit="'+event.id+'">Sửa</button><button class="danger" data-delete="'+event.id+'">Xóa</button>':'');
-      return '<tr><td class="ts">'+esc(fmtTime(event.ts))+'</td><td><span class="level '+esc(event.level)+'">'+esc(event.level)+'</span></td><td>'+esc(event.source)+'</td><td>'+
-        (trace?'<button type="button" class="link" title="'+esc(trace)+'" data-trace="'+esc(trace)+'">'+esc(trace)+'</button>':'')+'</td><td>'+esc(event.msg)+'</td><td class="actions">'+actions+'</td></tr>';
+      const actions='<button type="button" class="ghost" data-detail="'+index+'">Chi tiết</button>';
+      return '<tr><td class="ts">'+esc(fmtClock(event.ts))+'<span>'+esc(fmtDay(event.ts))+'</span></td>'+
+        '<td class="lvl"><span class="pill '+esc(event.level)+'">'+esc(event.level)+'</span></td><td class="src">'+esc(event.source)+'</td><td class="trc">'+
+        (trace?'<button type="button" class="link" title="'+esc(trace)+'" data-trace="'+esc(trace)+'">'+esc(trace)+'</button>':'<span class="muted">—</span>')+
+        '</td><td class="msg">'+esc(event.msg)+'</td><td class="actions">'+actions+'</td></tr>';
     }).join('');
   } catch(error) { setStatus('queryStatus',error.message,'error'); }
   finally { $('searchButton').disabled=false; }
@@ -167,10 +261,14 @@ async function runQuery(reset=false) {
 function showTrace(trace){ $('queryTrace').value=trace; if($('detailDialog').open)$('detailDialog').close(); runQuery(true); }
 function showDetail(event){
   const rows=[['ID',event.id],['Thời gian',fmtTime(event.ts)+' ('+event.ts+' ms)'],['Mức',event.level],['Nguồn',event.source],['Nội dung',event.msg]];
-  $('detailBody').innerHTML=rows.map(row=>'<dt>'+row[0]+'</dt><dd>'+esc(row[1])+'</dd>').join('')+
+  $('detailBody').innerHTML=rows.map(row=>'<dt>'+row[0]+'</dt><dd'+(row[0]==='ID'?' class="mono"':'')+'>'+esc(row[1])+'</dd>').join('')+
     '<dt>Fields</dt><dd><pre>'+esc(JSON.stringify(event.fields||{},null,2))+'</pre></dd>';
   const trace=(event.fields||{}).trace_id;
   $('detailTrace').hidden=!trace; $('detailTrace').dataset.trace=trace||'';
+  // Sua/xoa nam trong hop thoai: audit he thong khong sua hay xoa duoc.
+  const writable=canWrite&&!isAudit(event);
+  $('detailEdit').hidden=!writable; $('detailDelete').hidden=!writable;
+  $('detailEdit').dataset.edit=event.id; $('detailDelete').dataset.delete=event.id;
   $('detailDialog').showModal();
 }
 $('events').addEventListener('click',event=>{
@@ -181,7 +279,9 @@ $('events').addEventListener('click',event=>{
 $('detailTrace').addEventListener('click',()=>showTrace($('detailTrace').dataset.trace));
 $('closeDetail').addEventListener('click',()=>$('detailDialog').close());
 async function refresh(){await loadStats();await runQuery(true);}
+$('refreshButton').addEventListener('click',()=>refresh().catch(error=>setStatus('queryStatus',error.message,'error')));
 $('queryForm').addEventListener('submit',event=>{event.preventDefault();runQuery(true);});
+$('moreFilters').addEventListener('click',()=>{const open=$('queryForm').classList.toggle('show-more');$('moreFilters').setAttribute('aria-expanded',String(open));$('moreFilters').textContent=open?'Ẩn bộ lọc':'Bộ lọc khác';});
 $('nextPage').addEventListener('click',()=>{if(nextPageCursor){pageCursors.push(nextPageCursor);pageIndex++;runQuery();}});
 $('previousPage').addEventListener('click',()=>{if(pageIndex>0){pageIndex--;runQuery();}});
 if(canWrite){
@@ -193,42 +293,44 @@ if(canWrite){
     } catch(error){setStatus('writeStatus',error.message,'error');}
   });
   $('simulateButton').addEventListener('click',async()=>{
-    try{const r=await api('/api/simulate',{method:'POST',body:JSON.stringify({n:Number($('simN').value),hours:1})});setStatus('maintenanceStatus','Đã sinh '+r.written+' sự kiện mẫu','success');await refresh();}
+    try{const r=await api('/api/simulate',{method:'POST',body:JSON.stringify({n:Number($('simN').value),hours:1})});setStatus('maintenanceStatus','Đã sinh '+fmtInt(r.written)+' sự kiện mẫu','success');await refresh();}
     catch(error){setStatus('maintenanceStatus',error.message,'error');}
   });
   $('purgeButton').addEventListener('click',async()=>{
     const hours=Number($('purgeHours').value);
     if(!Number.isFinite(hours)||hours<=0){setStatus('maintenanceStatus','Số giờ phải lớn hơn 0','error');return;}
     if(!confirm('Xóa các sự kiện cũ hơn '+hours+' giờ? Thao tác này không thể hoàn tác.'))return;
-    try{const r=await api('/api/purge',{method:'POST',body:JSON.stringify({older_than_hours:hours})});setStatus('maintenanceStatus','Đã xóa '+r.deleted+' sự kiện','success');await refresh();}
+    try{const r=await api('/api/purge',{method:'POST',body:JSON.stringify({older_than_hours:hours})});setStatus('maintenanceStatus','Đã xóa '+fmtInt(r.deleted)+' sự kiện','success');await refresh();}
     catch(error){setStatus('maintenanceStatus',error.message,'error');}
   });
   $('exportButton').addEventListener('click',()=>{location.href='/api/export';});
   $('importButton').addEventListener('click',async()=>{
     const file=$('importFile').files[0];if(!file){setStatus('maintenanceStatus','Hãy chọn tệp JSONL trước','error');return;}
     const form=new FormData();form.append('file',file);
-    try{const r=await api('/api/import',{method:'POST',body:form});setStatus('maintenanceStatus','Đã nhập '+r.written+' sự kiện','success');$('importFile').value='';await refresh();}
+    try{const r=await api('/api/import',{method:'POST',body:form});setStatus('maintenanceStatus','Đã nhập '+fmtInt(r.written)+' sự kiện','success');$('importFile').value='';await refresh();}
     catch(error){setStatus('maintenanceStatus',error.message,'error');}
   });
   async function loadBackups(){
     const r=await api('/api/backups'),select=$('backupSelect'),selected=select.value;
-    select.innerHTML='<option value="">Chọn bản sao lưu</option>'+r.backups.map(name=>'<option value="'+esc(name)+'">'+esc(name)+'</option>').join('');
+    select.innerHTML='<option value="">'+(r.backups.length?'Chọn bản sao lưu':'Chưa có bản sao lưu')+'</option>'+r.backups.map(name=>'<option value="'+esc(name)+'">'+esc(name)+'</option>').join('');
     select.value=selected;
   }
   $('backupButton').addEventListener('click',async()=>{
-    try{const r=await api('/api/backup',{method:'POST'});setStatus('maintenanceStatus','Đã tạo bản sao lưu '+r.name,'success');await loadBackups();}
+    try{const r=await api('/api/backup',{method:'POST'});setStatus('maintenanceStatus','Đã tạo bản sao lưu '+r.name,'success');await loadBackups();$('backupSelect').value=r.name;}
     catch(error){setStatus('maintenanceStatus',error.message,'error');}
   });
   {% if user.role == 'admin' %}
   $('restoreButton').addEventListener('click',async()=>{
     const name=$('backupSelect').value;if(!name){setStatus('maintenanceStatus','Hãy chọn bản sao lưu','error');return;}
-    if(!confirm('Khôi phục '+name+'? Dữ liệu hiện tại sẽ được thay bằng bản sao này.'))return;
+    if(!confirm('Khôi phục '+name+'? Dữ liệu ghi sau thời điểm sao lưu sẽ không còn trong DB đang dùng.'))return;
     try{const r=await api('/api/restore',{method:'POST',body:JSON.stringify({name:name})});setStatus('maintenanceStatus','Đã chuyển sang bản sao lưu '+r.restored,'success');await refresh();await loadBackups();}
     catch(error){setStatus('maintenanceStatus',error.message,'error');}
   });
   {% endif %}
-  $('events').addEventListener('click',async event=>{
-    const editId=event.target.dataset.edit,deleteId=event.target.dataset.delete;
+  $('detailDialog').addEventListener('click',async event=>{
+    const button=event.target.closest('#detailEdit, #detailDelete'); if(!button)return;
+    const editId=button.dataset.edit,deleteId=button.dataset.delete;
+    if(editId||deleteId)$('detailDialog').close();
     if(editId){
       try{const r=await api('/api/events/'+editId);$('editId').value=r.id;$('editLevel').value=r.level;$('editSource').value=r.source;$('editMessage').value=r.msg;$('editFields').value=JSON.stringify(r.fields||{},null,2);$('editDialog').showModal();}
       catch(error){setStatus('queryStatus',error.message,'error');}

@@ -38,7 +38,7 @@ Nếu máy không có lệnh `py` nhưng đã cài Python 3.12 64-bit, dùng `py
 Mở **[http://127.0.0.1:5000](http://127.0.0.1:5000)**. Giữ cửa sổ PowerShell này mở khi sử dụng.
 
 1. Lần chạy đầu chuyển đến `/setup`: tự đặt tên admin và mật khẩu **tối thiểu 10 ký tự**, rồi đăng nhập.
-2. Vào **Quản lý người dùng** (`/users`), nhập mật khẩu tạm riêng cho các tài khoản mẫu và bấm **Nạp dữ liệu người dùng và nghiệp vụ mẫu**.
+2. Vào **Người dùng** (`/users`) trên thanh bên, nhập mật khẩu tạm riêng cho các tài khoản mẫu và bấm **Nạp dữ liệu người dùng và nghiệp vụ mẫu**.
 3. Trên DB mới, thao tác này thêm **4 hồ sơ người dùng, 32 sự kiện thuộc 5 trace**. Quay về dashboard để tra cứu `DEMO-ORDER-001` hoặc `DEMO-ORDER-003`.
 
 Repository chứa mã nguồn; không kèm DB đã tạo sẵn hoặc mật khẩu đăng nhập. App tự tạo các column family và thư mục cần thiết khi mở DB, không phải chạy migration hay kết nối máy chủ CSDL từ xa.
@@ -121,11 +121,11 @@ Thư mục `data/` chứa dữ liệu phát sinh khi chạy, không chứa mã n
 ## Kịch bản trình diễn
 
 1. Tạo admin ở `/setup` rồi đăng nhập.
-2. Trong “Quản lý người dùng”, chọn mật khẩu tạm tối thiểu 10 ký tự và bấm “Nạp dữ liệu người dùng và nghiệp vụ mẫu”. Hệ thống thêm 4 nhân sự giả lập (operator/viewer) cùng 32 sự kiện thuộc 5 trace liên kết; có đơn hàng thành công, thanh toán thử lại, giao dịch bị từ chối, thao tác vận hành và checkpoint.
+2. Trong “Người dùng”, chọn mật khẩu tạm tối thiểu 10 ký tự và bấm “Nạp dữ liệu người dùng và nghiệp vụ mẫu”. Hệ thống thêm 4 nhân sự giả lập (operator/viewer) cùng 32 sự kiện thuộc 5 trace liên kết; có đơn hàng thành công, thanh toán thử lại, giao dịch bị từ chối, thao tác vận hành và checkpoint.
 3. Sinh thêm khoảng 5.000 log tổng hợp nếu cần; bảng thống kê hiển thị bản ghi, dung lượng và số key theo column family.
 4. Tra cứu `DEMO-ORDER-001` theo trace ID để thấy một đơn hàng đi qua nhiều dịch vụ; thử `DEMO-ORDER-003` để xem xử lý lỗi và hoàn kho. Khi có Trace ID, giao diện tìm toàn bộ thời gian của trace (bỏ qua bộ lọc "1 giờ gần nhất"). Bấm Trace ID trong bảng hoặc nút **Chi tiết** để xem đầy đủ `fields` của sự kiện.
 5. Tra cứu theo thời gian, mức, nguồn hoặc từ khóa; tạo/sửa/xóa sự kiện thử.
-6. Vào “Quản lý người dùng”, xem hồ sơ/vai trò rồi đăng nhập bằng một tài khoản mẫu để kiểm tra quyền chỉ đọc hoặc thao tác.
+6. Vào “Người dùng”, xem hồ sơ/vai trò rồi đăng nhập bằng một tài khoản mẫu để kiểm tra quyền chỉ đọc hoặc thao tác.
 7. Xuất JSONL, nhập lại tệp đó, tạo checkpoint, thêm sự kiện rồi restore để xem trạng thái quay về snapshot. Nhập lại sẽ tạo sự kiện mới với ID mới; restore cũng khôi phục tài khoản/quyền về thời điểm checkpoint.
 
 Các thao tác xóa và khôi phục cần xác nhận trong giao diện. Hãy dùng dữ liệu thử, không dùng DB muốn giữ.

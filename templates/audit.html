@@ -1,19 +1,46 @@
 {% extends "base.html" %}
+{% set active_page = 'audit' %}
 {% block title %}Nhật ký kiểm toán · LogStore{% endblock %}
 {% block content %}
-<main>
-  <section class="section">
-    <h2>Nhật ký kiểm toán</h2>
-    <p class="muted">Chỉ quản trị viên xem được. Nhật ký được lưu cùng cơ sở dữ liệu RocksDB; khi khôi phục checkpoint cũ, nhật ký cũng có thể quay về trạng thái tại thời điểm checkpoint.</p>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>Thời điểm</th><th>Tài khoản</th><th>Thao tác</th><th>Đối tượng</th><th>Kết quả</th></tr></thead>
-        <tbody id="auditRows"><tr><td colspan="5">Đang tải…</td></tr></tbody>
-      </table>
+<main class="page">
+  <header class="titlerow">
+    <div>
+      <h1>Nhật ký kiểm toán</h1>
+      <p class="subline" id="auditFinding">Đang tải nhật ký…</p>
     </div>
-    <p id="auditStatus" class="status" role="status"></p>
-    <button id="loadMore" class="secondary" type="button" hidden>Tải nhật ký cũ hơn</button>
-  </section>
+  </header>
+  <div class="workspace">
+    <section class="panel" aria-labelledby="auditTitle">
+      <div class="panel-head">
+        <h2 id="auditTitle">Thao tác gần nhất</h2>
+        <p id="auditStatus" class="status small num" role="status"></p>
+      </div>
+      <div class="table-wrap" style="margin-top:12px">
+        <table style="min-width:640px">
+          <thead><tr><th>Thời điểm</th><th>Tài khoản</th><th>Thao tác</th><th>Đối tượng</th><th class="num">Kết quả</th></tr></thead>
+          <tbody id="auditRows"><tr><td colspan="5" class="empty muted">Đang tải…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="panel-body" style="display:flex;justify-content:flex-end">
+        <button id="loadMore" type="button" hidden>Tải nhật ký cũ hơn</button>
+      </div>
+    </section>
+    <div class="rail">
+      <section class="panel" aria-labelledby="auditSummaryTitle">
+        <div class="panel-head"><h2 id="auditSummaryTitle">Trong các dòng đã tải</h2></div>
+        <div class="panel-body">
+          <ul class="cf-list" id="auditSummary"><li class="muted">Đang tính…</li></ul>
+        </div>
+      </section>
+      <section class="panel" aria-labelledby="auditAboutTitle">
+        <div class="panel-head"><h2 id="auditAboutTitle">Cách ghi nhật ký</h2></div>
+        <div class="panel-body">
+          <p class="hint">Mỗi thao tác ghi thành công, mỗi lần đăng nhập sai và mỗi lần ingest tạo một bản ghi <code>audit-service</code> không sửa hoặc xóa được qua API.</p>
+          <p class="hint">Nhật ký nằm cùng cơ sở dữ liệu RocksDB: khôi phục một checkpoint cũ cũng đưa nhật ký về thời điểm đó. Retention không xóa bản ghi kiểm toán.</p>
+        </div>
+      </section>
+    </div>
+  </div>
 </main>
 {% endblock %}
 {% block scripts %}
@@ -22,13 +49,31 @@
   const rows = document.getElementById('auditRows');
   const status = document.getElementById('auditStatus');
   const more = document.getElementById('loadMore');
+  const loaded = [];
   let cursor = null;
   let busy = false;
-  const cell = (value) => {
+  const cell = (value, className) => {
     const td = document.createElement('td');
-    td.textContent = value == null ? '—' : String(value);
+    if (className) td.className = className;
+    if (value == null || value === '') { td.textContent = '—'; td.classList.add('muted'); }
+    else td.textContent = String(value);
     return td;
   };
+  function summarise() {
+    const failed = loaded.filter(item => item.status >= 400);
+    const logins = loaded.filter(item => item.action === 'session.login_failed');
+    const actors = new Set(loaded.map(item => item.actor));
+    const line = (label, value, note) => '<li class="cf-row"><span>' + label + '</span><span class="keys num">' + value +
+      '</span>' + (note ? '<span class="meta">' + note + '</span>' : '') + '</li>';
+    document.getElementById('auditSummary').innerHTML =
+      line('Bản ghi', loaded.length) +
+      line('Thất bại (4xx, 5xx)', failed.length, failed.length ? 'Gần nhất: ' + failed[0].action + ' lúc ' + new Date(failed[0].ts).toLocaleTimeString('vi-VN') : '') +
+      line('Đăng nhập sai', logins.length) +
+      line('Tài khoản hoặc nguồn khác nhau', actors.size);
+    document.getElementById('auditFinding').textContent = logins.length
+      ? logins.length + ' lần đăng nhập sai trong ' + loaded.length + ' bản ghi gần nhất.'
+      : 'Không có lần đăng nhập sai trong ' + loaded.length + ' bản ghi gần nhất.';
+  }
   async function load() {
     if (busy) return;
     busy = true;
@@ -43,19 +88,32 @@
       more.textContent = 'Tải nhật ký cũ hơn';
       if (firstPage) rows.replaceChildren();
       for (const item of page.events) {
+        loaded.push(item);
         const tr = document.createElement('tr');
-        const date = new Date(item.ts).toLocaleString('vi-VN');
-        tr.append(cell(date), cell(item.actor), cell(item.action), cell(item.target), cell(item.status));
+        const when = cell(new Date(item.ts).toLocaleTimeString('vi-VN'), 'ts');
+        const day = document.createElement('span');
+        day.textContent = new Date(item.ts).toLocaleDateString('vi-VN');
+        when.append(day);
+        const result = document.createElement('td');
+        result.className = 'num';
+        const pill = document.createElement('span');
+        pill.className = 'pill ' + (item.status >= 400 ? 'bad' : 'ok');
+        pill.textContent = item.status;
+        result.append(pill);
+        tr.append(when, cell(item.actor), cell(item.action, 'mono'), cell(item.target), result);
         rows.append(tr);
+      }
+      if (firstPage && !page.events.length) {
+        rows.innerHTML = '<tr><td colspan="5" class="empty"><div class="empty-box">Chưa có bản ghi kiểm toán.</div></td></tr>';
       }
       cursor = page.next_cursor;
       more.hidden = !page.has_more;
-      status.textContent = page.count ? `Đã tải ${page.count} bản ghi.` :
-        (page.has_more ? 'Chưa có audit trong đoạn đã quét; tải đoạn cũ hơn để tiếp tục.' : 'Không còn bản ghi kiểm toán.');
-      status.className = 'status';
+      status.textContent = loaded.length + ' bản ghi' + (page.has_more ? ' · còn bản ghi cũ hơn' : '');
+      status.className = 'status small num';
+      summarise();
     } catch (error) {
       status.textContent = error.message;
-      status.className = 'status error';
+      status.className = 'status small error';
       more.hidden = false;
       more.textContent = 'Thử lại';
     } finally {

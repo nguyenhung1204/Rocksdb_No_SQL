@@ -1,39 +1,58 @@
 {% extends "base.html" %}
+{% set active_page = 'users' %}
 {% block title %}Quản lý người dùng · LogStore{% endblock %}
 {% block content %}
-<main>
-  <section class="section">
-    <h2>Tài khoản người dùng</h2>
-    <p class="muted">Hồ sơ và vai trò được lưu trong column family <code>users</code>; mật khẩu chỉ lưu dưới dạng hash.</p>
-    <form id="demoSeedForm" class="row">
-      <label>Mật khẩu tạm cho tài khoản mẫu<input id="demoPassword" type="password" minlength="10" required></label>
-      <button class="secondary" type="submit">Nạp dữ liệu người dùng và nghiệp vụ mẫu</button>
-    </form>
-    <p class="muted">Dữ liệu hoàn toàn giả lập (.test); các sự kiện mẫu liên kết thành luồng qua trace ID.</p>
-    <hr>
-    <form id="userForm" class="row">
-      <label>Họ và tên<input id="fullName" maxlength="80"></label>
-      <label>Email<input id="email" type="email" maxlength="120"></label>
-      <label>Phòng ban<input id="department" maxlength="80"></label>
-      <label>Tên đăng nhập<input id="username" minlength="3" maxlength="32" required></label>
-      <label>Mật khẩu tạm<input id="password" type="password" minlength="10" required></label>
-      <label>Vai trò<select id="role"><option value="viewer">viewer · chỉ xem</option><option value="operator">operator · thao tác dữ liệu</option><option value="admin">admin · quản trị</option></select></label>
-      <button type="submit">Tạo tài khoản</button>
-    </form>
-    <div id="userStatus" class="status" role="status"></div>
-    <div class="table-wrap"><table>
-      <thead><tr><th>Nhân sự</th><th>Tài khoản và liên hệ</th><th>Vai trò</th><th>Trạng thái</th><th>Thao tác</th></tr></thead>
-      <tbody id="users"></tbody>
-    </table></div>
-  </section>
+<main class="page">
+  <header class="titlerow">
+    <div>
+      <h1>Người dùng</h1>
+      <p class="subline num" id="userSummary">Đang tải tài khoản…</p>
+    </div>
+  </header>
+  <div class="workspace">
+    <section class="panel" aria-labelledby="accountsTitle">
+      <div class="panel-head">
+        <h2 id="accountsTitle">Tài khoản</h2>
+        <div id="userStatus" class="status small" role="status"></div>
+      </div>
+      <div class="panel-body" style="padding-bottom:4px"><p class="hint">Hồ sơ và vai trò nằm trong column family <code>users</code>; mật khẩu chỉ lưu dưới dạng hash. Đổi vai trò có hiệu lực ngay.</p></div>
+      <div class="table-wrap"><table style="min-width:720px">
+        <thead><tr><th>Nhân sự</th><th>Tài khoản và liên hệ</th><th>Vai trò</th><th>Trạng thái</th><th class="num"><span class="sr-only">Thao tác</span></th></tr></thead>
+        <tbody id="users"><tr><td colspan="5" class="empty muted">Đang tải…</td></tr></tbody>
+      </table></div>
+    </section>
+    <div class="rail">
+      <section class="panel" aria-labelledby="createTitle">
+        <div class="panel-head"><h2 id="createTitle">Tạo tài khoản</h2></div>
+        <form id="userForm" class="panel-body stack">
+          <label>Họ và tên<input id="fullName" maxlength="80"></label>
+          <label>Email<input id="email" type="email" maxlength="120"></label>
+          <label>Phòng ban<input id="department" maxlength="80"></label>
+          <label>Tên đăng nhập<input id="username" minlength="3" maxlength="32" required></label>
+          <label>Mật khẩu tạm<input id="password" type="password" minlength="10" required aria-describedby="passwordRule"></label>
+          <span id="passwordRule" class="hint">Tối thiểu 10 ký tự.</span>
+          <label>Vai trò<select id="role"><option value="viewer">viewer · chỉ xem</option><option value="operator">operator · thao tác dữ liệu</option><option value="admin">admin · quản trị</option></select></label>
+          <div><button type="submit" class="primary">Tạo tài khoản</button></div>
+        </form>
+      </section>
+      <section class="panel" aria-labelledby="seedTitle">
+        <div class="panel-head"><h2 id="seedTitle">Dữ liệu mẫu</h2></div>
+        <form id="demoSeedForm" class="panel-body stack">
+          <p class="hint">Thêm 4 nhân sự giả lập (email .test) và 32 sự kiện thuộc 5 trace. Nạp lại không tạo bản ghi trùng.</p>
+          <label>Mật khẩu tạm cho tài khoản mẫu<input id="demoPassword" type="password" minlength="10" required></label>
+          <div><button type="submit">Nạp dữ liệu người dùng và nghiệp vụ mẫu</button></div>
+        </form>
+      </section>
+    </div>
+  </div>
 </main>
 <dialog id="passwordDialog">
   <h2>Đặt lại mật khẩu</h2>
-  <form id="passwordForm">
+  <form id="passwordForm" class="stack">
     <p class="muted">Tài khoản: <strong id="passwordUser"></strong></p>
     <label>Mật khẩu mới (tối thiểu 10 ký tự)<input id="newPassword" type="password" minlength="10" required autocomplete="new-password"></label>
     <p id="passwordError" class="error" role="alert"></p>
-    <div class="row"><button type="submit">Lưu mật khẩu</button><button class="secondary" type="button" id="cancelPassword">Đóng</button></div>
+    <div class="dialog-actions"><button type="button" id="cancelPassword">Đóng</button><button type="submit" class="primary">Lưu mật khẩu</button></div>
   </form>
 </dialog>
 {% endblock %}
@@ -54,14 +73,19 @@ async function api(path, options={}) {
 async function loadUsers() {
   try {
     const result = await api('/api/users');
-    document.getElementById('users').innerHTML = result.users.map(user => `<tr>
-      <td><strong>${esc(user.full_name || user.username)}</strong><br><span class="muted">${esc(user.department || 'Chưa khai báo phòng ban')}</span></td>
-      <td>${esc(user.username)}<br><span class="muted">${esc(user.email || 'Chưa khai báo email')}</span></td>
+    const users = result.users;
+    const count = role => users.filter(user => user.role === role).length;
+    const locked = users.filter(user => !user.enabled).length;
+    document.getElementById('userSummary').textContent = users.length + ' tài khoản · ' + count('admin') + ' admin, ' +
+      count('operator') + ' operator, ' + count('viewer') + ' viewer · ' + (locked ? locked + ' đang bị khóa' : 'không có tài khoản bị khóa');
+    const hue = name => [...name].reduce((sum, ch) => (sum * 31 + ch.charCodeAt(0)) % 360, 7);
+    document.getElementById('users').innerHTML = users.map(user => `<tr>
+      <td><div class="person"><span class="avatar" style="--hue:${hue(user.username)}">${esc((user.full_name || user.username).trim().split(/\s+/).pop()[0].toUpperCase())}</span>
+        <div style="white-space:nowrap"><strong style="font-weight:500">${esc(user.full_name || user.username)}</strong><span class="sub">${user.department ? esc(user.department) : '—'}</span></div></div></td>
+      <td>${esc(user.username)}<span class="sub">${user.email ? esc(user.email) : '—'}</span></td>
       <td><select data-role="${esc(user.username)}" aria-label="Vai trò của ${esc(user.username)}">${['viewer','operator','admin'].map(role => `<option ${role === user.role ? 'selected' : ''}>${role}</option>`).join('')}</select></td>
-      <td>${user.enabled ? 'Đang hoạt động' : 'Đã khóa'}</td>
-      <td class="actions"><button class="secondary" data-toggle="${esc(user.username)}" data-enabled="${user.enabled}">${user.enabled ? 'Khóa' : 'Mở khóa'}</button>
-      <button class="secondary" data-password="${esc(user.username)}">Đặt lại mật khẩu</button>
-      <button class="danger" data-delete="${esc(user.username)}">Xóa</button></td></tr>`).join('');
+      <td><span class="pill ${user.enabled ? 'ok' : 'bad'}">${user.enabled ? 'Hoạt động' : 'Đã khóa'}</span></td>
+      <td class="actions"><button type="button" class="ghost" data-toggle="${esc(user.username)}" data-enabled="${user.enabled}">${user.enabled ? 'Khóa' : 'Mở khóa'}</button><button type="button" class="ghost" data-password="${esc(user.username)}">Đổi mật khẩu</button><button type="button" class="ghost danger" data-delete="${esc(user.username)}">Xóa</button></td></tr>`).join('');
   } catch (error) { setUserStatus(error.message, 'error'); }
 }
 document.getElementById('demoSeedForm').addEventListener('submit', async event => {
@@ -103,7 +127,7 @@ document.getElementById('userForm').addEventListener('submit', async event => {
 });
 function setUserStatus(message, kind) {
   const status = document.getElementById('userStatus');
-  status.textContent = message; status.className = 'status' + (kind ? ' ' + kind : '');
+  status.textContent = message; status.className = 'status small' + (kind ? ' ' + kind : '');
 }
 document.getElementById('users').addEventListener('click', async event => {
   const toggle = event.target.dataset.toggle;
