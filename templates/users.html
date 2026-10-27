@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Quản lý người dùng · LogStore{% endblock %}
+{% block content %}
+<main>
+  <section class="section">
+    <h2>Tài khoản người dùng</h2>
+    <p class="muted">Hồ sơ và vai trò được lưu trong column family <code>users</code>; mật khẩu chỉ lưu dưới dạng hash.</p>
+    <form id="demoSeedForm" class="row">
+      <label>Mật khẩu tạm cho tài khoản mẫu<input id="demoPassword" type="password" minlength="10" required></label>
+      <button class="secondary" type="submit">Nạp dữ liệu người dùng và nghiệp vụ mẫu</button>
+    </form>
+    <p class="muted">Dữ liệu hoàn toàn giả lập (.test); các sự kiện mẫu liên kết thành luồng qua trace ID.</p>
+    <hr>
+    <form id="userForm" class="row">
+      <label>Họ và tên<input id="fullName" maxlength="80"></label>
+      <label>Email<input id="email" type="email" maxlength="120"></label>
+      <label>Phòng ban<input id="department" maxlength="80"></label>
+      <label>Tên đăng nhập<input id="username" minlength="3" maxlength="32" required></label>
+      <label>Mật khẩu tạm<input id="password" type="password" minlength="10" required></label>
+      <label>Vai trò<select id="role"><option value="viewer">viewer · chỉ xem</option><option value="operator">operator · thao tác dữ liệu</option><option value="admin">admin · quản trị</option></select></label>
+      <button type="submit">Tạo tài khoản</button>
+    </form>
+    <div id="userStatus" class="status" role="status"></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Nhân sự</th><th>Tài khoản và liên hệ</th><th>Vai trò</th><th>Trạng thái</th><th>Thao tác</th></tr></thead>
+      <tbody id="users"></tbody>
+    </table></div>
+  </section>
+</main>
+{% endblock %}
+{% block scripts %}
+<script>
+const csrf = document.querySelector('meta[name="csrf-token"]').content;
+const esc = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(path, options={}) {
+  options.headers = {...(options.headers || {}), 'X-CSRF-Token':csrf};
+  if (options.body && !(options.body instanceof FormData)) options.headers['Content-Type'] = 'application/json';
+  const response = await fetch(path, options);
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || response.status);
+  return body;
+}
+async function loadUsers() {
+  try {
+    const result = await api('/api/users');
+    document.getElementById('users').innerHTML = result.users.map(user => `<tr>
+      <td><strong>${esc(user.full_name || user.username)}</strong><br><span class="muted">${esc(user.department || 'Chưa khai báo phòng ban')}</span></td>
+      <td>${esc(user.username)}<br><span class="muted">${esc(user.email || 'Chưa khai báo email')}</span></td>
+      <td>${esc(user.role)}</td><td>${user.enabled ? 'Đang hoạt động' : 'Đã khóa'}</td>
+      <td><button class="secondary" data-toggle="${esc(user.username)}" data-enabled="${user.enabled}">${user.enabled ? 'Khóa' : 'Mở khóa'}</button>
+      <button class="danger" data-delete="${esc(user.username)}">Xóa</button></td></tr>`).join('');
+  } catch (error) { document.getElementById('userStatus').textContent = error.message; }
+}
+document.getElementById('demoSeedForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const status = document.getElementById('userStatus');
+  const button = event.submitter;
+  button.disabled = true;
+  status.textContent = 'Đang nạp hồ sơ và các luồng sự kiện mẫu…';
+  try {
+    const result = await api('/api/demo/seed', {method:'POST', body:JSON.stringify({
+      password:document.getElementById('demoPassword').value
+    })});
+    status.textContent = result.users_created || result.events_written
+      ? `Đã thêm ${result.users_created} tài khoản và ${result.events_written} sự kiện. Tài khoản mới dùng mật khẩu tạm bạn vừa nhập.`
+      : 'Dữ liệu mẫu đã có; không tạo bản ghi trùng.';
+    await loadUsers();
+  } catch (error) { status.textContent = error.message; }
+  finally { button.disabled = false; }
+});
+document.getElementById('userForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const status = document.getElementById('userStatus');
+  const button = event.submitter;
+  button.disabled = true;
+  status.textContent = 'Đang tạo tài khoản…';
+  try {
+    const result = await api('/api/users', {method:'POST', body:JSON.stringify({
+      full_name:document.getElementById('fullName').value,
+      email:document.getElementById('email').value,
+      department:document.getElementById('department').value,
+      username:document.getElementById('username').value,
+      password:document.getElementById('password').value,
+      role:document.getElementById('role').value
+    })});
+    status.textContent = `Đã tạo ${result.username}`;
+    event.target.reset(); await loadUsers();
+  } catch (error) { status.textContent = error.message; }
+  finally { button.disabled = false; }
+});
+document.getElementById('users').addEventListener('click', async event => {
+  const toggle = event.target.dataset.toggle;
+  const remove = event.target.dataset.delete;
+  try {
+    if (toggle) await api('/api/users/' + encodeURIComponent(toggle), {method:'PUT', body:JSON.stringify({enabled:event.target.dataset.enabled !== 'true'})});
+    if (remove && confirm(`Xóa tài khoản ${remove}?`)) await api('/api/users/' + encodeURIComponent(remove), {method:'DELETE'});
+    await loadUsers();
+  } catch (error) { document.getElementById('userStatus').textContent = error.message; }
+});
+loadUsers();
+</script>
+{% endblock %}

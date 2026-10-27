@@ -1,0 +1,202 @@
+{% extends "base.html" %}
+{% block title %}LogStore · Bảng điều khiển{% endblock %}
+{% block content %}
+<main>
+  <section class="section">
+    <h2>Tình trạng cơ sở dữ liệu</h2>
+    <div id="stats" class="stats" aria-live="polite"></div>
+    <div class="table-wrap"><table style="min-width:620px">
+      <thead><tr><th>Column family</th><th>Số key ước tính</th><th>SST</th><th>Memtable</th><th>File L0</th></tr></thead>
+      <tbody id="columnFamilies"></tbody>
+    </table></div>
+    <p id="dbPath" class="muted"></p>
+  </section>
+
+  {% if user.role in ['admin', 'operator'] %}
+  <section class="section">
+    <h2>Quản lý và trao đổi dữ liệu</h2>
+    <div class="row">
+      <label>Số sự kiện mẫu<input id="simN" type="number" value="5000" min="1" max="200000" style="width:145px"></label>
+      <button class="secondary" id="simulateButton">Sinh dữ liệu mẫu</button>
+      <label>Lưu log (giờ)<input id="purgeHours" type="number" value="24" min="1" max="87600" style="width:120px"></label>
+      <button class="danger" id="purgeButton">Xóa log cũ</button>
+      <button class="secondary" id="exportButton">Xuất JSONL</button>
+      <label>Nhập JSONL<input id="importFile" type="file" accept=".jsonl,.ndjson,application/json"></label>
+      <button class="secondary" id="importButton">Nhập tệp</button>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button id="backupButton">Tạo bản sao lưu</button>
+      <label>Bản sao lưu<select id="backupSelect" style="min-width:260px"><option value="">Chọn bản sao lưu</option></select></label>
+      {% if user.role == 'admin' %}<button class="secondary" id="restoreButton">Khôi phục bản sao lưu</button>{% endif %}
+    </div>
+    <div id="maintenanceStatus" class="status" role="status"></div>
+    <p class="muted">Khôi phục tạo thư mục dữ liệu mới rồi chuyển ứng dụng sang bản sao đó. Bản sao lưu cũ vẫn được giữ.</p>
+  </section>
+  <section class="section">
+    <h2>Ghi sự kiện</h2>
+    <form id="eventForm" class="row">
+      <label>Mức<select id="writeLevel">{% for level in levels %}<option {{ 'selected' if level == 'INFO' }}>{{ level }}</option>{% endfor %}</select></label>
+      <label>Nguồn<input id="writeSource" value="demo-app" maxlength="128" required></label>
+      <label>Nội dung<input id="writeMessage" value="Sự kiện minh họa RocksDB" maxlength="2000" style="min-width:260px" required></label>
+      <label>Trace ID<input id="writeTrace" maxlength="256" placeholder="trace-001"></label>
+      <button type="submit">Ghi sự kiện</button>
+    </form>
+    <div id="writeStatus" class="status" role="status"></div>
+  </section>
+  {% endif %}
+
+  <section class="section">
+    <h2>Tra cứu sự kiện</h2>
+    <form id="queryForm" class="row">
+      <label>Khoảng thời gian<select id="lastMinutes">
+        <option value="15">15 phút gần nhất</option><option value="60" selected>1 giờ gần nhất</option>
+        <option value="360">6 giờ gần nhất</option><option value="1440">24 giờ gần nhất</option><option value="">Tất cả</option>
+      </select></label>
+      <label>Mức tối thiểu<select id="queryLevel"><option value="">Tất cả</option>{% for level in levels %}<option>{{ level }}</option>{% endfor %}</select></label>
+      <label>Nguồn<select id="querySource"><option value="">Tất cả</option></select></label>
+      <label>Trace ID<input id="queryTrace" maxlength="256" placeholder="trace-001"></label>
+      <label>Từ khóa trong nội dung<input id="queryText" maxlength="500" placeholder="timeout"></label>
+      <label>Số kết quả<input id="queryLimit" type="number" value="50" min="1" max="1000" style="width:100px"></label>
+      <button type="submit">Tìm kiếm</button>
+    </form>
+    <div id="queryStatus" class="status" role="status"></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Thời gian</th><th>Mức</th><th>Nguồn</th><th>Trace ID</th><th>Nội dung</th>{% if user.role in ['admin', 'operator'] %}<th>Thao tác</th>{% endif %}</tr></thead>
+      <tbody id="events"></tbody>
+    </table></div>
+  </section>
+</main>
+{% if user.role in ['admin', 'operator'] %}
+<dialog id="editDialog">
+  <h2>Sửa sự kiện</h2>
+  <form id="editForm">
+    <input id="editId" type="hidden">
+    <label>Mức<select id="editLevel">{% for level in levels %}<option>{{ level }}</option>{% endfor %}</select></label>
+    <label style="margin-top:8px">Nguồn<input id="editSource" required maxlength="128"></label>
+    <label style="margin-top:8px">Nội dung<textarea id="editMessage" rows="3" required maxlength="2000" style="width:100%"></textarea></label>
+    <label style="margin-top:8px">Fields dạng JSON<textarea id="editFields" rows="4" style="width:100%;font-family:Consolas,monospace"></textarea></label>
+    <p id="editError" class="error" role="alert"></p>
+    <div class="row"><button type="submit">Lưu thay đổi</button><button class="secondary" type="button" id="cancelEdit">Đóng</button></div>
+  </form>
+</dialog>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+const role = {{ user.role|tojson }};
+const canWrite = role === 'admin' || role === 'operator';
+const $ = id => document.getElementById(id);
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtBytes = value => value < 1024 ? value + ' B' : value < 1048576 ? (value/1024).toFixed(1) + ' KB' : (value/1048576).toFixed(1) + ' MB';
+const fmtTime = ms => new Date(ms).toLocaleString('vi-VN');
+
+async function api(path, options={}) {
+  const headers = {...(options.headers || {})};
+  if (['POST','PUT','PATCH','DELETE'].includes((options.method || 'GET').toUpperCase())) headers['X-CSRF-Token'] = csrfToken;
+  if (options.body && !(options.body instanceof FormData)) headers['Content-Type'] = 'application/json';
+  const response = await fetch(path, {...options, headers});
+  if (response.status === 401) { location.href = '/login'; throw new Error('Phiên đăng nhập đã hết hạn'); }
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || ('HTTP ' + response.status));
+  return body;
+}
+async function loadStats() {
+  const result = await api('/api/stats');
+  const totals = [['Tổng sự kiện',result.total_events],['Dung lượng RocksDB',fmtBytes(result.disk_bytes)],
+    ['Nguồn log',result.sources.length],['ERROR + FATAL trong 1 giờ',result.by_level_last_hour.ERROR + result.by_level_last_hour.FATAL]];
+  $('stats').innerHTML = totals.map(item => '<div class="stat"><strong>'+esc(item[1])+'</strong><span>'+item[0]+'</span></div>').join('');
+  $('columnFamilies').innerHTML = Object.entries(result.column_families).map(item => {
+    const cf=item[1]; return '<tr><td>'+esc(item[0])+'</td><td>'+esc(cf.estimate_num_keys)+'</td><td>'+fmtBytes(cf.sst_size_bytes)+'</td><td>'+fmtBytes(cf.memtable_bytes)+'</td><td>'+esc(cf.l0_files)+'</td></tr>';
+  }).join('');
+  $('dbPath').textContent = 'Thư mục DB đang dùng: ' + result.path;
+  const select=$('querySource'), selected=select.value;
+  select.innerHTML='<option value="">Tất cả</option>'+result.sources.map(s=>'<option value="'+esc(s)+'">'+esc(s)+'</option>').join('');
+  select.value=selected;
+}
+async function runQuery() {
+  const params=new URLSearchParams();
+  if ($('lastMinutes').value) params.set('last_minutes',$('lastMinutes').value);
+  if ($('queryLevel').value) params.set('level',$('queryLevel').value);
+  if ($('querySource').value) params.set('source',$('querySource').value);
+  if ($('queryTrace').value) params.set('trace_id',$('queryTrace').value.trim());
+  if ($('queryText').value) params.set('q',$('queryText').value.trim());
+  params.set('limit',$('queryLimit').value||'50');
+  try {
+    const result=await api('/api/events?'+params.toString());
+    $('queryStatus').textContent=result.count+' kết quả · '+result.took_ms+' ms';
+    $('events').innerHTML=result.events.map(event=>'<tr><td class="ts">'+esc(fmtTime(event.ts))+'</td><td><span class="level '+esc(event.level)+'">'+esc(event.level)+'</span></td><td>'+esc(event.source)+'</td><td>'+esc((event.fields||{}).trace_id||'')+'</td><td>'+esc(event.msg)+'</td>'+
+      (canWrite?'<td class="actions"><button class="secondary" data-edit="'+event.id+'">Sửa</button><button class="danger" data-delete="'+event.id+'">Xóa</button></td>':'')+'</tr>').join('');
+  } catch(error) { $('queryStatus').textContent=error.message; }
+}
+async function refresh(){await loadStats();await runQuery();}
+$('queryForm').addEventListener('submit',event=>{event.preventDefault();runQuery();});
+if(canWrite){
+  $('eventForm').addEventListener('submit',async event=>{
+    event.preventDefault(); const fields=$('writeTrace').value.trim()?{trace_id:$('writeTrace').value.trim()}:{};
+    try {
+      const result=await api('/api/events',{method:'POST',body:JSON.stringify({level:$('writeLevel').value,source:$('writeSource').value.trim(),msg:$('writeMessage').value,fields:fields})});
+      $('writeStatus').textContent='Đã ghi sự kiện '+result.ids[0]; await refresh();
+    } catch(error){$('writeStatus').textContent=error.message;}
+  });
+  $('simulateButton').addEventListener('click',async()=>{
+    try{const r=await api('/api/simulate',{method:'POST',body:JSON.stringify({n:Number($('simN').value),hours:1})});$('maintenanceStatus').textContent='Đã sinh '+r.written+' sự kiện mẫu';await refresh();}
+    catch(error){$('maintenanceStatus').textContent=error.message;}
+  });
+  $('purgeButton').addEventListener('click',async()=>{
+    const hours=Number($('purgeHours').value);
+    if(!Number.isFinite(hours)||hours<=0){$('maintenanceStatus').textContent='Số giờ phải lớn hơn 0';return;}
+    if(!confirm('Xóa các sự kiện cũ hơn '+hours+' giờ? Thao tác này không thể hoàn tác.'))return;
+    try{const r=await api('/api/purge',{method:'POST',body:JSON.stringify({older_than_hours:hours})});$('maintenanceStatus').textContent='Đã xóa '+r.deleted+' sự kiện';await refresh();}
+    catch(error){$('maintenanceStatus').textContent=error.message;}
+  });
+  $('exportButton').addEventListener('click',()=>{location.href='/api/export';});
+  $('importButton').addEventListener('click',async()=>{
+    const file=$('importFile').files[0];if(!file){$('maintenanceStatus').textContent='Hãy chọn tệp JSONL trước';return;}
+    const form=new FormData();form.append('file',file);
+    try{const r=await api('/api/import',{method:'POST',body:form});$('maintenanceStatus').textContent='Đã nhập '+r.written+' sự kiện';$('importFile').value='';await refresh();}
+    catch(error){$('maintenanceStatus').textContent=error.message;}
+  });
+  async function loadBackups(){
+    const r=await api('/api/backups'),select=$('backupSelect'),selected=select.value;
+    select.innerHTML='<option value="">Chọn bản sao lưu</option>'+r.backups.map(name=>'<option value="'+esc(name)+'">'+esc(name)+'</option>').join('');
+    select.value=selected;
+  }
+  $('backupButton').addEventListener('click',async()=>{
+    try{const r=await api('/api/backup',{method:'POST'});$('maintenanceStatus').textContent='Đã tạo bản sao lưu '+r.name;await loadBackups();}
+    catch(error){$('maintenanceStatus').textContent=error.message;}
+  });
+  {% if user.role == 'admin' %}
+  $('restoreButton').addEventListener('click',async()=>{
+    const name=$('backupSelect').value;if(!name){$('maintenanceStatus').textContent='Hãy chọn bản sao lưu';return;}
+    if(!confirm('Khôi phục '+name+'? Dữ liệu hiện tại sẽ được thay bằng bản sao này.'))return;
+    try{const r=await api('/api/restore',{method:'POST',body:JSON.stringify({name:name})});$('maintenanceStatus').textContent='Đã chuyển sang bản sao lưu '+r.restored;await refresh();await loadBackups();}
+    catch(error){$('maintenanceStatus').textContent=error.message;}
+  });
+  {% endif %}
+  $('events').addEventListener('click',async event=>{
+    const editId=event.target.dataset.edit,deleteId=event.target.dataset.delete;
+    if(editId){
+      try{const r=await api('/api/events/'+editId);$('editId').value=r.id;$('editLevel').value=r.level;$('editSource').value=r.source;$('editMessage').value=r.msg;$('editFields').value=JSON.stringify(r.fields||{},null,2);$('editDialog').showModal();}
+      catch(error){$('queryStatus').textContent=error.message;}
+    }
+    if(deleteId&&confirm('Xóa sự kiện này? Thao tác không thể hoàn tác.')){
+      try{await api('/api/events/'+deleteId,{method:'DELETE'});await refresh();}
+      catch(error){$('queryStatus').textContent=error.message;}
+    }
+  });
+  $('editForm').addEventListener('submit',async event=>{
+    event.preventDefault();
+    try{
+      const fields=JSON.parse($('editFields').value||'{}');
+      if(!fields||typeof fields!=='object'||Array.isArray(fields))throw new Error('Fields phải là object JSON');
+      await api('/api/events/'+$('editId').value,{method:'PUT',body:JSON.stringify({level:$('editLevel').value,source:$('editSource').value.trim(),msg:$('editMessage').value,fields:fields})});
+      $('editDialog').close();$('editError').textContent='';await refresh();
+    }catch(error){$('editError').textContent=error.message;}
+  });
+  $('cancelEdit').addEventListener('click',()=>$('editDialog').close());
+  loadBackups().catch(error=>$('maintenanceStatus').textContent=error.message);
+}
+refresh().catch(error=>$('queryStatus').textContent=error.message);
+</script>
+{% endblock %}

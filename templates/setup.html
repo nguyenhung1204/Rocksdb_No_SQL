@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Khởi tạo LogStore{% endblock %}
+{% block content %}
+<main>
+  <section class="section" style="max-width:520px;width:100%;margin:40px auto">
+    <h2>Tạo tài khoản quản trị đầu tiên</h2>
+    <p class="muted">Trang khởi tạo chỉ dùng được khi cơ sở dữ liệu chưa có người dùng.</p>
+    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    <form method="post" action="/setup">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Tên đăng nhập<input name="username" minlength="3" maxlength="32" autocomplete="username" required></label>
+      <label style="margin-top:10px">Mật khẩu, tối thiểu 10 ký tự<input name="password" type="password" minlength="10" autocomplete="new-password" required></label>
+      <label style="margin-top:10px">Nhập lại mật khẩu<input name="confirm_password" type="password" minlength="10" autocomplete="new-password" required></label>
+      <button style="margin-top:14px">Tạo quản trị viên</button>
+    </form>
+  </section>
+</main>
+{% endblock %}

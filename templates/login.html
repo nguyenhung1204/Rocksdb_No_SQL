@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Đăng nhập LogStore{% endblock %}
+{% block content %}
+<main>
+  <section class="section" style="max-width:440px;width:100%;margin:50px auto">
+    <h2>Đăng nhập</h2>
+    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    <form method="post" action="/login">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Tên đăng nhập<input name="username" autocomplete="username" required></label>
+      <label style="margin-top:10px">Mật khẩu<input name="password" type="password" autocomplete="current-password" required></label>
+      <button style="margin-top:14px">Đăng nhập</button>
+    </form>
+  </section>
+</main>
+{% endblock %}
