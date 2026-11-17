@@ -33,7 +33,7 @@ def login_required(view):
     def wrapped(*args, **kwargs):
         if current_user() is None:
             if request.path.startswith("/api/"):
-                return jsonify({"error": "can dang nhap"}), 401
+                return jsonify({"error": "cần đăng nhập"}), 401
             return redirect(url_for("auth.login"))
         return view(*args, **kwargs)
     return wrapped
@@ -46,12 +46,12 @@ def roles_required(*roles):
             user = current_user()
             if user is None:
                 if request.path.startswith("/api/"):
-                    return jsonify({"error": "can dang nhap"}), 401
+                    return jsonify({"error": "cần đăng nhập"}), 401
                 return redirect(url_for("auth.login"))
             if user["role"] not in roles:
                 if request.path.startswith("/api/"):
-                    return jsonify({"error": "khong du quyen"}), 403
-                return "Khong du quyen", 403
+                    return jsonify({"error": "không đủ quyền"}), 403
+                return "Không đủ quyền", 403
             return view(*args, **kwargs)
         return wrapped
     return decorate
@@ -63,7 +63,7 @@ def _valid_username(username):
 
 def _password_error(password):
     if not isinstance(password, str) or len(password) < MIN_PASSWORD_LENGTH:
-        return "mat khau phai co it nhat 10 ky tu"
+        return "mật khẩu phải có ít nhất 10 ký tự"
     return None
 
 
@@ -74,12 +74,12 @@ def _profile_fields(body):
             continue
         value = body[key]
         if not isinstance(value, str):
-            raise ValueError("%s phai la chuoi" % key)
+            raise ValueError("%s phải là chuỗi" % key)
         value = value.strip()
         if len(value) > maximum:
-            raise ValueError("%s toi da %d ky tu" % (key, maximum))
+            raise ValueError("%s tối đa %d ký tự" % (key, maximum))
         if key == "email" and value and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
-            raise ValueError("email khong hop le")
+            raise ValueError("email không hợp lệ")
         if value:
             profile[key] = value
     return profile
@@ -106,11 +106,11 @@ def setup():
         password = request.form.get("password", "")
         confirmation = request.form.get("confirm_password", "")
         if not _valid_username(username):
-            error = "ten dang nhap can 3-32 ky tu: chu, so, cham, gach duoi hoac gach ngang"
+            error = "tên đăng nhập cần 3-32 ký tự: chữ, số, dấu chấm, gạch dưới hoặc gạch ngang"
         elif _password_error(password):
             error = _password_error(password)
         elif password != confirmation:
-            error = "mat khau xac nhan khong khop"
+            error = "mật khẩu xác nhận không khớp"
         else:
             with current_app.extensions["account_lock"]:
                 if store.list_users():
@@ -140,7 +140,7 @@ def login():
         retry_after = throttle.retry_after(username, client_address)
         if retry_after:
             response = make_response(render_template(
-                "login.html", error="Dang nhap tam thoi bi gioi han; hay thu lai sau.",
+                "login.html", error="Đăng nhập tạm thời bị giới hạn; hãy thử lại sau.",
                 csrf_token=session["_csrf"],
             ), 429)
             response.headers["Retry-After"] = str(retry_after)
@@ -148,7 +148,7 @@ def login():
         user = get_store().get_user(username)
         if not user or not user.get("enabled", True) or not check_password_hash(user["password_hash"], password):
             throttle.record_failure(username, client_address)
-            error = "ten dang nhap hoac mat khau khong dung"
+            error = "tên đăng nhập hoặc mật khẩu không đúng"
             # So lan ghi bi gioi han boi LoginThrottle; lan bi chan (429) khong ghi them.
             g.audit_event = ("session.login_failed", "anonymous", username[:64] or "(trong)", 401)
         else:
@@ -185,23 +185,23 @@ def users_list():
 def users_create():
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
-        raise ValueError("body phai la object JSON")
+        raise ValueError("body phải là object JSON")
     username = body.get("username", "")
     password = body.get("password", "")
     role = body.get("role", "viewer")
     profile = _profile_fields(body)
     if not _valid_username(username):
-        raise ValueError("ten dang nhap can 3-32 ky tu hop le")
+        raise ValueError("tên đăng nhập cần 3-32 ký tự hợp lệ")
     username = username.strip().lower()
     error = _password_error(password)
     if error:
         raise ValueError(error)
     if not isinstance(role, str) or role not in ROLES:
-        raise ValueError("role phai la admin, operator hoac viewer")
+        raise ValueError("role phải là admin, operator hoặc viewer")
     store = get_store()
     with current_app.extensions["account_lock"]:
         if store.get_user(username):
-            raise ValueError("ten dang nhap da ton tai")
+            raise ValueError("tên đăng nhập đã tồn tại")
         store.put_user(username, {
             "password_hash": generate_password_hash(password),
             "role": role,
@@ -216,26 +216,26 @@ def users_create():
 def users_update(username):
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
-        raise ValueError("body phai la object JSON")
+        raise ValueError("body phải là object JSON")
     unknown = set(body) - {"role", "enabled", "password", "full_name", "email", "department"}
     if unknown:
-        raise ValueError("truong khong ho tro: %s" % ", ".join(sorted(unknown)))
+        raise ValueError("trường không hỗ trợ: %s" % ", ".join(sorted(unknown)))
     store = get_store()
     username = username.strip().lower()
     with current_app.extensions["account_lock"]:
         user = store.get_user(username)
         if not user:
-            return jsonify({"error": "khong tim thay nguoi dung"}), 404
+            return jsonify({"error": "không tìm thấy người dùng"}), 404
         if username == current_user()["username"] and ("role" in body or body.get("enabled") is False):
-            raise ValueError("khong the giam quyen hoac vo hieu hoa tai khoan dang dang nhap")
+            raise ValueError("không thể giảm quyền hoặc vô hiệu hóa tài khoản đang đăng nhập")
         was_active_admin = user.get("role") == "admin" and user.get("enabled", True)
         if "role" in body:
             if not isinstance(body["role"], str) or body["role"] not in ROLES:
-                raise ValueError("role phai la admin, operator hoac viewer")
+                raise ValueError("role phải là admin, operator hoặc viewer")
             user["role"] = body["role"]
         if "enabled" in body:
             if not isinstance(body["enabled"], bool):
-                raise ValueError("enabled phai la true hoac false")
+                raise ValueError("enabled phải là true hoặc false")
             user["enabled"] = body["enabled"]
         if "password" in body:
             error = _password_error(body["password"])
@@ -247,7 +247,7 @@ def users_update(username):
         if was_active_admin and not remains_admin:
             remaining = [u for u in store.list_users() if u["username"] != username and u.get("role") == "admin" and u.get("enabled", True)]
             if not remaining:
-                raise ValueError("phai con it nhat mot admin dang hoat dong")
+                raise ValueError("phải còn ít nhất một admin đang hoạt động")
         store.put_user(username, user)
     return jsonify({"username": username, "role": user["role"], "enabled": user.get("enabled", True)})
 
@@ -260,12 +260,12 @@ def users_delete(username):
     with current_app.extensions["account_lock"]:
         user = store.get_user(username)
         if not user:
-            return jsonify({"error": "khong tim thay nguoi dung"}), 404
+            return jsonify({"error": "không tìm thấy người dùng"}), 404
         if username == current_user()["username"]:
-            raise ValueError("khong the xoa tai khoan dang dang nhap")
+            raise ValueError("không thể xóa tài khoản đang đăng nhập")
         if user.get("role") == "admin" and user.get("enabled", True):
             remaining = [u for u in store.list_users() if u["username"] != username and u.get("role") == "admin" and u.get("enabled", True)]
             if not remaining:
-                raise ValueError("phai con it nhat mot admin dang hoat dong")
+                raise ValueError("phải còn ít nhất một admin đang hoạt động")
         store.delete_user(username)
     return jsonify({"deleted": username})

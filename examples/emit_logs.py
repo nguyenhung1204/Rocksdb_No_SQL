@@ -2,14 +2,18 @@
 
 import json
 import os
+import sys
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     token = os.environ.get("LOGSTORE_INGEST_TOKEN")
     if not token:
-        raise SystemExit("Hay dat LOGSTORE_INGEST_TOKEN trung voi app.py truoc khi chay.")
+        raise SystemExit("Hãy đặt LOGSTORE_INGEST_TOKEN trùng với app.py trước khi chạy.")
 
     events = [
         {
@@ -49,12 +53,18 @@ def main():
     )
     try:
         with urlopen(request, timeout=10) as response:
-            print(response.read().decode("utf-8"))
+            result = json.loads(response.read().decode("utf-8"))
+        print("Gửi %d sự kiện của trace ORDER-2026-1042 tới LogStore:" % len(events))
+        print("  - Ghi mới : %d" % result["written"])
+        print("  - Bị trùng: %d (đã gửi trước đó, LogStore trả lại đúng ID cũ, không ghi thêm)"
+              % result["duplicates"])
+        for event, event_id in zip(events, result["ids"]):
+            print("    %-36s -> %s" % (event["source_event_id"], event_id))
     except HTTPError as error:
         print(error.read().decode("utf-8"))
-        raise SystemExit("Ingest bi tu choi (HTTP %d)." % error.code)
+        raise SystemExit("Ingest bị từ chối (HTTP %d)." % error.code)
     except URLError as error:
-        raise SystemExit("Khong ket noi duoc toi LogStore: %s" % error.reason)
+        raise SystemExit("Không kết nối được tới LogStore: %s" % error.reason)
 
 
 if __name__ == "__main__":

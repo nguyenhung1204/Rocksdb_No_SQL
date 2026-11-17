@@ -441,9 +441,9 @@ class StoreTest(unittest.TestCase):
 
     def test_audit_events_cannot_be_updated_or_deleted(self):
         event_id = self.s.put_audit("admin", "event.delete", "test:1", 200)
-        with self.assertRaisesRegex(ValueError, "audit"):
+        with self.assertRaisesRegex(ValueError, "kiểm toán"):
             self.s.update_event(event_id, msg="tampered")
-        with self.assertRaisesRegex(ValueError, "audit"):
+        with self.assertRaisesRegex(ValueError, "kiểm toán"):
             self.s.delete_event(event_id)
 
     def test_retention_keeps_immutable_audit_events_and_their_indexes(self):

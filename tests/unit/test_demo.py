@@ -46,7 +46,7 @@ class DemoSeedTest(unittest.TestCase):
 
     def test_seed_requires_an_active_admin(self):
         self.store.delete_user("admin")
-        with self.assertRaisesRegex(ValueError, "tao admin dau tien"):
+        with self.assertRaisesRegex(ValueError, "tạo admin đầu tiên"):
             seed_demo(self.store, "Demo-temp-pass-123")
         self.assertEqual(self.store.list_users(), [])
         self.assertEqual(self.store.count(), 0)

@@ -25,9 +25,9 @@ def retention_settings(environ=None):
         try:
             value = int(raw)
         except (TypeError, ValueError) as error:
-            raise ValueError("%s phai la so nguyen" % name) from error
+            raise ValueError("%s phải là số nguyên" % name) from error
         if not minimum <= value <= maximum:
-            raise ValueError("%s phai trong khoang %d-%d" % (name, minimum, maximum))
+            raise ValueError("%s phải trong khoảng %d-%d" % (name, minimum, maximum))
         parsed.append(value)
     return dict(zip(("hours", "interval_seconds", "backup_count"), parsed))
 
@@ -128,12 +128,12 @@ def _valid_checkpoint(path, root):
 def prune_checkpoints(backup_root, keep_count, newest_path=None):
     """Remove only old, valid, directly-contained named RocksDB checkpoints."""
     if not isinstance(keep_count, int) or isinstance(keep_count, bool) or keep_count < 0:
-        raise ValueError("keep_count phai la so nguyen khong am")
+        raise ValueError("keep_count phải là số nguyên không âm")
     if keep_count == 0:
         return 0
     root = Path(backup_root).resolve(strict=True)
     if not root.is_dir():
-        raise ValueError("backup_root phai la thu muc")
+        raise ValueError("backup_root phải là thư mục")
     valid = [path for path in root.iterdir() if _valid_checkpoint(path, root)]
     valid.sort(key=lambda path: (path.stat().st_mtime_ns, path.name), reverse=True)
     if not valid:

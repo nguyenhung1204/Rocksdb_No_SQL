@@ -8,6 +8,20 @@ LogStore lưu sự kiện trong RocksDB, tự duy trì các index theo mức đ�
 
 Đã kiểm tra với **Python 3.12 64-bit**. Cần Internet để tải mã nguồn và cài thư viện lần đầu; sau đó demo chạy cục bộ. Không cần cài một RocksDB server riêng: thư viện `rocksdict` cung cấp engine RocksDB nhúng, lưu dữ liệu trong thư mục trên máy.
 
+### Chạy demo một chạm
+
+Trong thư mục dự án có sẵn các tệp `.bat` cho buổi demo:
+
+| Tệp | Việc làm |
+|---|---|
+| `chay_demo.bat` | Tự tạo `.venv` và cài thư viện ở lần đầu, rồi hỏi: **[1]** chạy với dữ liệu hiện có hoặc **[2]** tạo lại CSDL demo mới (admin, 4 tài khoản mẫu, 32 sự kiện theo 5 trace, 50.000 sự kiện tự sinh tính đến hiện tại và một bản sao lưu ban đầu). Mở http://127.0.0.1:5000 sau khi cửa sổ báo đang chạy. |
+| `gui_log_demo.bat` | Mô phỏng ứng dụng khác gửi 4 sự kiện qua `/api/ingest`, rồi gửi lại lần hai để thấy cơ chế chống ghi trùng. Tra Trace ID `ORDER-2026-1042` trên web. |
+| `ldb_demo.bat` | Chạy `ldb` và `sst_dump` (công cụ chính thức của RocksDB) qua WSL trên bản sao lưu mới nhất: liệt kê column family, xem bộ đếm, quét chỉ mục trace, đọc bản ghi theo mã sự kiện, xem thuộc tính tệp SST. Cần WSL Ubuntu 24.04 và `sudo apt install rocksdb-tools`. |
+
+Nên chọn **[2]** ngay trước buổi demo để các ô "60 phút qua" và bộ lọc "1 giờ gần nhất" có dữ liệu. Mật khẩu tài khoản demo không nằm trong mã nguồn: script hỏi khi tạo, hoặc đọc `LOGSTORE_DEMO_ADMIN_PASSWORD`, `LOGSTORE_DEMO_USER_PASSWORD` từ tệp `.env.demo` cục bộ (đã bị `.gitignore` bỏ qua; `chay_demo.bat` tự tạo tệp này kèm một token ingest ngẫu nhiên ở lần đầu).
+
+Các bước dưới đây là cách cài và chạy thủ công.
+
 ### 1. Lấy mã nguồn
 
 Nếu đã có Git, mở PowerShell trong thư mục muốn lưu dự án:

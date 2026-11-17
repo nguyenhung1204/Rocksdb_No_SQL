@@ -80,27 +80,27 @@ def _cookie_secure_setting(runtime_environment):
         return True
     if value in {"0", "false", "no"}:
         return False
-    raise ValueError("LOGSTORE_COOKIE_SECURE phai la true hoac false")
+    raise ValueError("LOGSTORE_COOKIE_SECURE phải là true hoặc false")
 
 
 def _ingest_credentials_from_environment():
     raw_mapping = os.environ.get("LOGSTORE_INGEST_TOKENS")
     legacy_token = os.environ.get("LOGSTORE_INGEST_TOKEN")
     if raw_mapping is not None and legacy_token and legacy_token.strip():
-        raise ValueError("chi duoc cau hinh LOGSTORE_INGEST_TOKENS hoac LOGSTORE_INGEST_TOKEN")
+        raise ValueError("chỉ được cấu hình LOGSTORE_INGEST_TOKENS hoặc LOGSTORE_INGEST_TOKEN")
     if raw_mapping is None:
         return {}, legacy_token
     try:
         mapping = json.loads(raw_mapping)
     except json.JSONDecodeError as error:
-        raise ValueError("LOGSTORE_INGEST_TOKENS phai la JSON object hop le") from error
+        raise ValueError("LOGSTORE_INGEST_TOKENS phải là JSON object hợp lệ") from error
     if not isinstance(mapping, dict) or not mapping or len(mapping) > 128:
-        raise ValueError("LOGSTORE_INGEST_TOKENS phai la object co 1-128 producer")
+        raise ValueError("LOGSTORE_INGEST_TOKENS phải là object có 1-128 producer")
     if any(not isinstance(name, str) or not name.strip() or len(name) > 128 or "\x00" in name
            or not isinstance(token, str) or not token.strip() for name, token in mapping.items()):
-        raise ValueError("ten producer va token ingest khong duoc rong hoac vuot gioi han")
+        raise ValueError("tên producer và token ingest không được rỗng hoặc vượt giới hạn")
     if len(set(mapping.values())) != len(mapping):
-        raise ValueError("token trong LOGSTORE_INGEST_TOKENS phai duy nhat")
+        raise ValueError("token trong LOGSTORE_INGEST_TOKENS phải duy nhất")
     return mapping, None
 
 
@@ -110,7 +110,7 @@ def create_app(db_path=None, backup_path=None, secret_key=None):
     if runtime_environment == "production" and (
         not isinstance(configured_secret, str) or len(configured_secret.strip()) < 32
     ):
-        raise RuntimeError("LOGSTORE_SECRET_KEY phai co it nhat 32 ky tu trong production")
+        raise RuntimeError("LOGSTORE_SECRET_KEY phải có ít nhất 32 ký tự trong production")
     secure_cookie = _cookie_secure_setting(runtime_environment)
     ingest_tokens, legacy_ingest_token = _ingest_credentials_from_environment()
     maintenance = retention_settings()
@@ -185,7 +185,7 @@ def create_app(db_path=None, backup_path=None, secret_key=None):
         if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.endpoint != "api.ingest":
             supplied = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
             if not supplied or not secrets.compare_digest(session.get("_csrf", ""), supplied):
-                return jsonify({"error": "CSRF token khong hop le"}), 400
+                return jsonify({"error": "CSRF token không hợp lệ"}), 400
         g.audit_actor = session.get("username")
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             lock = app.extensions["store_lock"]
@@ -253,7 +253,7 @@ def create_app(db_path=None, backup_path=None, secret_key=None):
 
     @app.errorhandler(RequestEntityTooLarge)
     def request_too_large(_error):
-        return jsonify({"error": "Yeu cau vuot qua gioi han 10 MB"}), 413
+        return jsonify({"error": "Yêu cầu vượt quá giới hạn 10 MB"}), 413
 
     @app.errorhandler(Exception)
     def unexpected_error(error):
@@ -261,14 +261,14 @@ def create_app(db_path=None, backup_path=None, secret_key=None):
             return error
         app.logger.exception("Unhandled error on %s %s", request.method, request.path)
         if request.path.startswith("/api/"):
-            return jsonify({"error": "loi he thong; xem log ung dung"}), 500
-        return "Loi he thong", 500
+            return jsonify({"error": "lỗi hệ thống; xem log ứng dụng"}), 500
+        return "Lỗi hệ thống", 500
 
     @app.errorhandler(404)
     def not_found(_error):
         if request.path.startswith("/api/"):
-            return jsonify({"error": "khong tim thay"}), 404
-        return "Khong tim thay trang", 404
+            return jsonify({"error": "không tìm thấy"}), 404
+        return "Không tìm thấy trang", 404
 
     from .auth import auth_bp
     from .api import api_bp

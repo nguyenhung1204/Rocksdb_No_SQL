@@ -249,26 +249,26 @@ class LogStore:
     @staticmethod
     def _check_event(level, source, msg=None, fields=None):
         if not isinstance(level, str) or level not in LEVEL_NUM:
-            raise ValueError("level phai thuoc %s" % LEVELS)
+            raise ValueError("level phải thuộc %s" % LEVELS)
         if not isinstance(source, str) or not source or "\x00" in source:
-            raise ValueError("source khong duoc rong va khong chua ky tu NUL")
+            raise ValueError("source không được rỗng và không chứa ký tự NUL")
         if len(source) > MAX_KEY_FIELD_LENGTH:
-            raise ValueError("source toi da %d ky tu" % MAX_KEY_FIELD_LENGTH)
+            raise ValueError("source tối đa %d ký tự" % MAX_KEY_FIELD_LENGTH)
         if not isinstance(msg, str):
-            raise ValueError("msg phai la chuoi")
+            raise ValueError("msg phải là chuỗi")
         if fields is not None and not isinstance(fields, dict):
-            raise ValueError("fields phai la object JSON")
+            raise ValueError("fields phải là object JSON")
         trace_id = (fields or {}).get("trace_id")
         if trace_id is not None and (not isinstance(trace_id, str) or "\x00" in trace_id):
-            raise ValueError("fields.trace_id phai la chuoi khong chua ky tu NUL")
+            raise ValueError("fields.trace_id phải là chuỗi không chứa ký tự NUL")
         if trace_id is not None and len(trace_id) > MAX_KEY_FIELD_LENGTH:
-            raise ValueError("fields.trace_id toi da %d ky tu" % MAX_KEY_FIELD_LENGTH)
+            raise ValueError("fields.trace_id tối đa %d ký tự" % MAX_KEY_FIELD_LENGTH)
 
     @staticmethod
     def _check_ts(ts_ms):
         if (not isinstance(ts_ms, int) or isinstance(ts_ms, bool)
                 or not 0 <= ts_ms <= MAX_TS_MS):
-            raise ValueError("ts phai la so nguyen milliseconds trong khoang 0-%d" % MAX_TS_MS)
+            raise ValueError("ts phải là số nguyên milliseconds trong khoảng 0-%d" % MAX_TS_MS)
 
     def _trim_late_sequences(self):
         # Chi goi truoc khi cap ID cho mot batch moi: trong batch, cache phai giu
@@ -311,16 +311,16 @@ class LogStore:
         remains reserved until its event is explicitly deleted or retained away.
         """
         if not isinstance(producer_id, str) or not producer_id or "\x00" in producer_id:
-            raise ValueError("producer_id khong hop le")
+            raise ValueError("producer_id không hợp lệ")
         if len(events) != len(source_event_ids):
-            raise ValueError("source_event_id bi thieu")
+            raise ValueError("source_event_id bị thiếu")
         keys = []
         hashes = []
         prefix = producer_id.encode("utf-8") + b"\x00"
         for event, source_event_id in zip(events, source_event_ids):
             if (not isinstance(source_event_id, str) or not source_event_id.strip()
                     or len(source_event_id) > 512 or "\x00" in source_event_id):
-                raise ValueError("source_event_id phai la chuoi 1-512 ky tu")
+                raise ValueError("source_event_id phải là chuỗi 1-512 ký tự")
             level, source, msg, fields, ts_ms = event
             self._check_event(level, source, msg, fields)
             if ts_ms is not None:
@@ -343,13 +343,13 @@ class LogStore:
             for index, (event, key, payload_hash) in enumerate(zip(events, keys, hashes)):
                 entry = new_entries.get(key)
                 if entry is not None and entry["hash"].encode("ascii") != payload_hash:
-                    raise IdempotencyConflict("source_event_id da duoc dung voi noi dung khac")
+                    raise IdempotencyConflict("source_event_id đã được dùng với nội dung khác")
                 if entry is None:
                     raw = self.cf_ingest.get(key)
                     if raw is not None:
                         entry = json.loads(raw.decode("utf-8"))
                         if entry.get("hash", "").encode("ascii") != payload_hash:
-                            raise IdempotencyConflict("source_event_id da duoc dung voi noi dung khac")
+                            raise IdempotencyConflict("source_event_id đã được dùng với nội dung khác")
                         event_id = bytes.fromhex(entry["id"])
                         if self.db.get(event_id) is None:
                             raise RuntimeError("idempotency mapping points to a missing event")
@@ -521,11 +521,11 @@ class LogStore:
           exclude_audit    : True = bo qua ban ghi audit he thong
         """
         if limit < 0:
-            raise ValueError("limit khong duoc am")
+            raise ValueError("limit không được âm")
         if limit == 0:
             return []
         if before_id and after_id:
-            raise ValueError("before_id va after_id khong the dung cung luc")
+            raise ValueError("before_id và after_id không thể dùng cùng lúc")
 
         lo, hi = self._time_bounds(start_ms, end_ms)
         if lo >= hi:
@@ -593,15 +593,15 @@ class LogStore:
         try:
             event_id = bytes.fromhex(cursor)
         except (TypeError, ValueError):
-            raise ValueError("cursor phai la event ID hex hop le")
+            raise ValueError("cursor phải là event ID hex hợp lệ")
         if len(event_id) != ID_LEN:
-            raise ValueError("cursor phai la event ID hex hop le")
+            raise ValueError("cursor phải là event ID hex hợp lệ")
         return event_id
 
     def update_event(self, event_id, *, level=None, source=None, msg=None, fields=None):
         """Cap nhat mot su kien, giu nguyen ID va dong bo cac index trong WriteBatch."""
         if len(event_id) != ID_LEN:
-            raise ValueError("id khong hop le")
+            raise ValueError("id không hợp lệ")
         with self._lock:
             raw = self.db.get(event_id)
             if raw is None:
@@ -613,7 +613,7 @@ class LogStore:
             fields = old["fields"] if fields is None else fields
             self._check_event(level, source, msg, fields)
             if is_internal_audit_event(old):
-                raise ValueError("khong the sua audit event")
+                raise ValueError("không thể sửa bản ghi kiểm toán")
             if is_internal_audit_event({"source": source, "fields": fields}):
                 raise ValueError("_audit is reserved for system audit records")
 
@@ -637,14 +637,14 @@ class LogStore:
     def delete_event(self, event_id):
         """Xoa mot su kien va cac index lien quan trong cung mot WriteBatch."""
         if len(event_id) != ID_LEN:
-            raise ValueError("id khong hop le")
+            raise ValueError("id không hợp lệ")
         with self._lock:
             raw = self.db.get(event_id)
             if raw is None:
                 return False
             old = self._decode(event_id, raw)
             if is_internal_audit_event(old):
-                raise ValueError("khong the xoa audit event")
+                raise ValueError("không thể xóa bản ghi kiểm toán")
             wb = WriteBatch(raw_mode=True)
             wb.delete(event_id, self.h_default)
             wb.delete(bytes([LEVEL_NUM[old["level"]]]) + event_id, self.h_level)
@@ -662,7 +662,7 @@ class LogStore:
     @staticmethod
     def _normalize_username(username):
         if not isinstance(username, str) or not username.strip():
-            raise ValueError("username khong duoc rong")
+            raise ValueError("username không được rỗng")
         return username.strip().lower()
 
     def get_user(self, username):
@@ -683,7 +683,7 @@ class LogStore:
     def put_user(self, username, user):
         username = self._normalize_username(username)
         if not isinstance(user, dict):
-            raise ValueError("user phai la object")
+            raise ValueError("user phải là object")
         self.cf_users.put(username.encode("utf-8"), json.dumps(
             user, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8"))

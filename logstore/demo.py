@@ -147,10 +147,10 @@ def _repair_clamped_demo_events(store, expected_events):
 def seed_demo(store, password):
     """Add synthetic staff and linked event workflows without overwriting data."""
     if not isinstance(password, str) or len(password) < 10:
-        raise ValueError("mat khau tai khoan demo phai co it nhat 10 ky tu")
+        raise ValueError("mật khẩu tài khoản demo phải có ít nhất 10 ký tự")
     if not any(user.get("role") == "admin" and user.get("enabled", True)
                for user in store.list_users()):
-        raise ValueError("hay tao admin dau tien truoc khi nap du lieu demo")
+        raise ValueError("hãy tạo admin đầu tiên trước khi nạp dữ liệu demo")
 
     created_users = 0
     for profile in DEMO_USERS:

@@ -18,16 +18,16 @@ def server_options(environ=None):
     env = os.environ if environ is None else environ
     host = env.get("LOGSTORE_HOST", "127.0.0.1").strip()
     if not host:
-        raise ValueError("LOGSTORE_HOST khong duoc de trong")
+        raise ValueError("LOGSTORE_HOST không được để trống")
     try:
         port = int(env.get("LOGSTORE_PORT", "5000"))
         threads = int(env.get("LOGSTORE_THREADS", "8"))
     except (TypeError, ValueError) as error:
-        raise ValueError("LOGSTORE_PORT va LOGSTORE_THREADS phai la so nguyen") from error
+        raise ValueError("LOGSTORE_PORT và LOGSTORE_THREADS phải là số nguyên") from error
     if not 1 <= port <= 65535:
-        raise ValueError("LOGSTORE_PORT phai trong khoang 1-65535")
+        raise ValueError("LOGSTORE_PORT phải trong khoảng 1-65535")
     if not 1 <= threads <= 64:
-        raise ValueError("LOGSTORE_THREADS phai trong khoang 1-64")
+        raise ValueError("LOGSTORE_THREADS phải trong khoảng 1-64")
     return {"host": host, "port": port, "threads": threads}
 
 

@@ -27,13 +27,13 @@ def parse_duration(text):
     """'30m' -> ms, '2h' -> ms, '7d' -> ms"""
     m = re.fullmatch(r"(\d+)([smhd])", text.strip())
     if not m:
-        raise argparse.ArgumentTypeError("dinh dang thoi gian: 30s, 15m, 2h, 7d")
+        raise argparse.ArgumentTypeError("định dạng thời gian: 30s, 15m, 2h, 7d")
     n, unit = int(m.group(1)), m.group(2)
     return n * {"s": 1000, "m": 60_000, "h": 3_600_000, "d": 86_400_000}[unit]
 
 
 def parse_time(text):
-    """'2026-10-12 09:30' hoac '2026-10-12' -> ms (gio local)"""
+    """'2026-10-12 09:30' hoặc '2026-10-12' -> ms (giờ địa phương)"""
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
             return int(datetime.datetime.strptime(text, fmt).timestamp() * 1000)
@@ -61,31 +61,31 @@ def human(n):
 # ------------------------------------------------------------------ lenh con
 def cmd_gen(a, s):
     t = time.time()
-    events = generate(a.n, span_hours=a.hours, seed=a.seed)
+    events = generate(a.n, span_hours=a.hours, seed=a.seed, vietnamese=True)
     t_gen = time.time() - t
     t = time.time()
     for i in range(0, len(events), a.batch):
         s.put_many(events[i:i + a.batch])
     dt = time.time() - t
-    print("Da ghi %d su kien (sinh: %.2fs, ghi: %.2fs, %d su kien/giay, batch=%d)"
+    print("Đã ghi %d sự kiện (sinh: %.2fs, ghi: %.2fs, %d sự kiện/giây, batch=%d)"
           % (a.n, t_gen, dt, a.n / dt if dt else 0, a.batch))
 
 
 def cmd_seed_demo(a, s):
     result = seed_demo(s, a.password)
-    print("Da them %d tai khoan mau va %d su kien theo luong nghiep vu"
+    print("Đã thêm %d tài khoản mẫu và %d sự kiện theo luồng nghiệp vụ"
           % (result["users_created"], result["events_written"]))
 
 
 def cmd_add(a, s):
     fields = json.loads(a.fields) if a.fields else None
     eid = s.put_event(a.level, a.source, a.msg, fields)
-    print("Da ghi, id =", eid.hex())
+    print("Đã ghi, id =", eid.hex())
 
 
 def cmd_get(a, s):
     e = s.get(LogStore.parse_id(a.id))
-    print(json.dumps(e, ensure_ascii=False, indent=2) if e else "Khong tim thay")
+    print(json.dumps(e, ensure_ascii=False, indent=2) if e else "Không tìm thấy")
 
 
 def cmd_query(a, s):
@@ -102,14 +102,14 @@ def cmd_query(a, s):
             print(json.dumps(e, ensure_ascii=False))
         else:
             print_event(e)
-    print("-- %d ket qua trong %.2f ms" % (len(rows), dt), file=sys.stderr)
+    print("-- %d kết quả trong %.2f ms" % (len(rows), dt), file=sys.stderr)
 
 
 def cmd_count(a, s):
     c = s.count_by_level(a.start, a.end)
     for lv in LEVELS:
         print("%-6s %d" % (lv, c[lv]))
-    print("%-6s %d" % ("TONG", sum(c.values())))
+    print("%-6s %d" % ("TỔNG", sum(c.values())))
 
 
 def cmd_sources(a, s):
@@ -118,9 +118,9 @@ def cmd_sources(a, s):
 
 def cmd_stats(a, s):
     st = s.stats()
-    print("Thu muc DB :", st["path"])
-    print("Dung luong :", human(st["disk_bytes"]))
-    print("%-12s %12s %12s %12s %8s" % ("CF", "so key (uoc)", "SST", "memtable", "L0 file"))
+    print("Thư mục DB :", st["path"])
+    print("Dung lượng :", human(st["disk_bytes"]))
+    print("%-12s %12s %12s %12s %8s" % ("CF", "số key (ước)", "SST", "memtable", "L0 file"))
     for name, v in st["column_families"].items():
         print("%-12s %12d %12s %12s %8d" % (name, v["estimate_num_keys"],
               human(v["sst_size_bytes"]), human(v["memtable_bytes"]), v["l0_files"]))
@@ -128,21 +128,21 @@ def cmd_stats(a, s):
 
 def cmd_purge(a, s):
     if a.older_than <= 0:
-        raise ValueError("--older-than phai lon hon 0")
+        raise ValueError("--older-than phải lớn hơn 0")
     cutoff = int(time.time() * 1000) - a.older_than
     before = s.stats()["disk_bytes"]
     n = s.purge_older_than(cutoff, compact=a.compact)
     after = s.stats()["disk_bytes"]
-    print("Da xoa %d su kien truoc %s" % (n, fmt_ts(cutoff)))
-    print("Dung luong: %s -> %s%s" % (human(before), human(after),
-          "" if a.compact else "  (chay them --compact de giai phong dung luong)"))
+    print("Đã xóa %d sự kiện trước %s" % (n, fmt_ts(cutoff)))
+    print("Dung lượng: %s -> %s%s" % (human(before), human(after),
+          "" if a.compact else "  (chạy thêm --compact để giải phóng dung lượng)"))
 
 
 def cmd_compact(a, s):
     before = s.stats()["disk_bytes"]
     s.flush()
     s.compact()
-    print("Dung luong: %s -> %s" % (human(before), human(s.stats()["disk_bytes"])))
+    print("Dung lượng: %s -> %s" % (human(before), human(s.stats()["disk_bytes"])))
 
 
 def cmd_backup(a, s):
@@ -150,8 +150,8 @@ def cmd_backup(a, s):
     try:
         s.backup(a.dest)
     except FileExistsError:
-        sys.exit("Thu muc %s da ton tai, hay chon ten khac (checkpoint can thu muc moi)" % a.dest)
-    print("Da backup vao", a.dest)
+        sys.exit("Thư mục %s đã tồn tại, hãy chọn tên khác (checkpoint cần thư mục mới)" % a.dest)
+    print("Đã sao lưu vào", a.dest)
 
 
 def cmd_import(a, s):
@@ -161,33 +161,33 @@ def cmd_import(a, s):
             if not line.strip():
                 continue
             if len(events) >= 100_000:
-                raise ValueError("tep vuot qua 100000 su kien")
+                raise ValueError("tệp vượt quá 100000 sự kiện")
             try:
                 record = json.loads(line)
             except json.JSONDecodeError as error:
-                raise ValueError("JSONL loi tai dong %d: %s" % (line_no, error.msg))
+                raise ValueError("JSONL lỗi tại dòng %d: %s" % (line_no, error.msg))
             if not isinstance(record, dict):
-                raise ValueError("dong %d phai la object JSON" % line_no)
+                raise ValueError("dòng %d phải là object JSON" % line_no)
             level = record.get("level", "INFO")
             level = level.upper() if isinstance(level, str) else level
             source, msg, fields = record.get("source", ""), record.get("msg", ""), record.get("fields")
             ts = record.get("ts")
             if ts is not None and (not isinstance(ts, int) or isinstance(ts, bool) or not 0 <= ts <= 0xFFFFFFFFFFFFFFFF):
-                raise ValueError("ts tai dong %d phai la so nguyen milliseconds hop le" % line_no)
+                raise ValueError("ts tại dòng %d phải là số nguyên milliseconds hợp lệ" % line_no)
             s._check_event(level, source, msg, fields)
             events.append((level, source, msg, fields, ts))
     if not events:
-        raise ValueError("tep JSONL khong co su kien")
+        raise ValueError("tệp JSONL không có sự kiện")
     ids = s.put_many(events)
-    print("Da nhap %d su kien" % len(ids))
+    print("Đã nhập %d sự kiện" % len(ids))
 
 
 def cmd_export(a, s):
     if not 1 <= a.limit <= 1_000_000:
-        raise ValueError("--limit phai trong khoang 1-1000000")
+        raise ValueError("--limit phải trong khoảng 1-1000000")
     total = s.count()
     if total > a.limit:
-        raise ValueError("co %d su kien, vuot qua gioi han --limit %d" % (total, a.limit))
+        raise ValueError("có %d sự kiện, vượt quá giới hạn --limit %d" % (total, a.limit))
     rows = s.query(limit=a.limit)
     os.makedirs(os.path.dirname(os.path.abspath(a.path)), exist_ok=True)
     exported_count = 0
@@ -198,87 +198,91 @@ def cmd_export(a, s):
             record = {key: event[key] for key in ("level", "source", "msg", "fields", "ts")}
             stream.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
             exported_count += 1
-    print("Da xuat %d su kien vao %s" % (exported_count, a.path))
+    print("Đã xuất %d sự kiện vào %s" % (exported_count, a.path))
 
 
 def cmd_restore(a, _s=None):
     LogStore.restore(a.backup, a.dest)
-    print("Da khoi phuc %s vao %s" % (a.backup, a.dest))
+    print("Đã khôi phục %s vào %s" % (a.backup, a.dest))
 
 
 def main():
-    p = argparse.ArgumentParser(description="LogStore - luu tru nhat ky tren RocksDB")
-    p.add_argument("--db", default=DEFAULT_DB, help="thu muc DB (mac dinh %s)" % DEFAULT_DB)
-    p.add_argument("--sync", action="store_true", help="fsync WAL moi lan ghi")
+    # In tiếng Việt có dấu đúng trên mọi console/pipe (Windows mặc định không phải UTF-8).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    p = argparse.ArgumentParser(description="LogStore - lưu trữ nhật ký trên RocksDB")
+    p.add_argument("--db", default=DEFAULT_DB, help="thư mục DB (mặc định %s)" % DEFAULT_DB)
+    p.add_argument("--sync", action="store_true", help="fsync WAL mỗi lần ghi")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    g = sub.add_parser("gen", help="sinh du lieu mau")
+    g = sub.add_parser("gen", help="sinh dữ liệu mẫu")
     g.add_argument("--n", type=int, default=100_000)
     g.add_argument("--hours", type=int, default=24)
     g.add_argument("--seed", type=int, default=42)
     g.add_argument("--batch", type=int, default=1000)
     g.set_defaults(fn=cmd_gen)
 
-    demo = sub.add_parser("seed-demo", help="them tai khoan va luong su kien demo co lien ket")
+    demo = sub.add_parser("seed-demo", help="thêm tài khoản và luồng sự kiện demo có liên kết")
     demo.add_argument("--password", required=True,
-                      help="mat khau tam chung cho tai khoan demo, toi thieu 10 ky tu")
+                      help="mật khẩu tạm chung cho tài khoản demo, tối thiểu 10 ký tự")
     demo.set_defaults(fn=cmd_seed_demo)
 
-    ad = sub.add_parser("add", help="ghi 1 su kien")
+    ad = sub.add_parser("add", help="ghi 1 sự kiện")
     ad.add_argument("level", choices=LEVELS)
     ad.add_argument("source")
     ad.add_argument("msg")
     ad.add_argument("--fields", help='JSON, vd \'{"user":1}\'')
     ad.set_defaults(fn=cmd_add)
 
-    ge = sub.add_parser("get", help="doc 1 su kien theo id")
+    ge = sub.add_parser("get", help="đọc 1 sự kiện theo id")
     ge.add_argument("id")
     ge.set_defaults(fn=cmd_get)
 
-    q = sub.add_parser("query", help="truy van su kien")
+    q = sub.add_parser("query", help="truy vấn sự kiện")
     q.add_argument("--start", type=parse_time)
     q.add_argument("--end", type=parse_time)
-    q.add_argument("--last", type=parse_duration, help="vd 30m, 2h, 1d")
-    q.add_argument("--level", choices=LEVELS, help="lay tu muc nay tro len")
+    q.add_argument("--last", type=parse_duration, help="ví dụ 30m, 2h, 1d")
+    q.add_argument("--level", choices=LEVELS, help="lấy từ mức này trở lên")
     q.add_argument("--source")
-    q.add_argument("--trace-id", help="loc theo trace_id trong fields")
-    q.add_argument("--contains", help="loc chuoi con trong msg")
+    q.add_argument("--trace-id", help="lọc theo trace_id trong fields")
+    q.add_argument("--contains", help="lọc chuỗi con trong msg")
     q.add_argument("--limit", type=int, default=20)
     q.add_argument("--oldest-first", action="store_true")
     q.add_argument("--json", action="store_true")
     q.set_defaults(fn=cmd_query)
 
-    c = sub.add_parser("count", help="dem su kien theo muc")
+    c = sub.add_parser("count", help="đếm sự kiện theo mức")
     c.add_argument("--start", type=parse_time)
     c.add_argument("--end", type=parse_time)
     c.set_defaults(fn=cmd_count)
 
-    sub.add_parser("sources", help="liet ke cac nguon").set_defaults(fn=cmd_sources)
-    sub.add_parser("stats", help="thong ke RocksDB").set_defaults(fn=cmd_stats)
+    sub.add_parser("sources", help="liệt kê các nguồn").set_defaults(fn=cmd_sources)
+    sub.add_parser("stats", help="thống kê RocksDB").set_defaults(fn=cmd_stats)
 
-    pg = sub.add_parser("purge", help="xoa log cu (retention)")
-    pg.add_argument("--older-than", type=parse_duration, required=True, help="vd 12h, 7d")
+    pg = sub.add_parser("purge", help="xóa log cũ (retention)")
+    pg.add_argument("--older-than", type=parse_duration, required=True, help="ví dụ 12h, 7d")
     pg.add_argument("--compact", action="store_true")
     pg.set_defaults(fn=cmd_purge)
 
-    sub.add_parser("compact", help="flush + compaction thu cong").set_defaults(fn=cmd_compact)
+    sub.add_parser("compact", help="flush + compaction thủ công").set_defaults(fn=cmd_compact)
 
-    b = sub.add_parser("backup", help="sao luu bang checkpoint")
+    b = sub.add_parser("backup", help="sao lưu bằng checkpoint")
     b.add_argument("dest")
     b.set_defaults(fn=cmd_backup)
 
-    imp = sub.add_parser("import", help="nhap su kien tu tep JSONL")
-    imp.add_argument("path", help="duong dan tep UTF-8 JSONL")
+    imp = sub.add_parser("import", help="nhập sự kiện từ tệp JSONL")
+    imp.add_argument("path", help="đường dẫn tệp UTF-8 JSONL")
     imp.set_defaults(fn=cmd_import)
 
-    exp = sub.add_parser("export", help="xuat su kien ra tep JSONL")
-    exp.add_argument("path", help="duong dan tep ket qua")
+    exp = sub.add_parser("export", help="xuất sự kiện ra tệp JSONL")
+    exp.add_argument("path", help="đường dẫn tệp kết quả")
     exp.add_argument("--limit", type=int, default=1_000_000)
     exp.set_defaults(fn=cmd_export)
 
-    restore = sub.add_parser("restore", help="khoi phuc checkpoint vao thu muc DB moi")
-    restore.add_argument("backup", help="thu muc checkpoint nguon")
-    restore.add_argument("dest", help="thu muc DB moi, phai chua ton tai")
+    restore = sub.add_parser("restore", help="khôi phục checkpoint vào thư mục DB mới")
+    restore.add_argument("backup", help="thư mục checkpoint nguồn")
+    restore.add_argument("dest", help="thư mục DB mới, phải chưa tồn tại")
     restore.set_defaults(fn=cmd_restore)
 
     a = p.parse_args()
@@ -290,7 +294,7 @@ def main():
             with LogStore(a.db, sync_writes=a.sync) as s:
                 a.fn(a, s)
     except (OSError, ValueError, TypeError) as error:
-        sys.exit("Loi: %s" % error)
+        sys.exit("Lỗi: %s" % error)
 
 
 if __name__ == "__main__":

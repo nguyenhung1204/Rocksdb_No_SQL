@@ -25,7 +25,7 @@ class CliExchangeTest(unittest.TestCase):
     def run_cli(self, *args):
         return subprocess.run(
             [sys.executable, CLI_PATH, "--db", self.db, *args],
-            cwd=PROJECT_ROOT, text=True, capture_output=True,
+            cwd=PROJECT_ROOT, encoding="utf-8", errors="replace", capture_output=True,
         )
 
     def test_import_export_round_trip(self):
@@ -57,7 +57,7 @@ class CliExchangeTest(unittest.TestCase):
             stream.write('{"level":"LOUD","source":"api","msg":"invalid"}\n')
         result = self.run_cli("import", source)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("level phai thuoc", result.stderr)
+        self.assertIn("level phải thuộc", result.stderr)
         with LogStore(self.db) as store:
             self.assertEqual(store.count(), 0)
 
@@ -77,7 +77,7 @@ class CliExchangeTest(unittest.TestCase):
             store.put_event("INFO", "api", "keep", ts_ms=1700000000000)
         result = self.run_cli("purge", "--older-than", "0h")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("lon hon 0", result.stderr)
+        self.assertIn("lớn hơn 0", result.stderr)
         with LogStore(self.db) as store:
             self.assertEqual(store.count(), 1)
 
@@ -96,10 +96,10 @@ class CliExchangeTest(unittest.TestCase):
             })
         seeded = self.run_cli("seed-demo", "--password", "Demo-temp-pass-123")
         self.assertEqual(seeded.returncode, 0, seeded.stderr)
-        self.assertIn("4 tai khoan mau va 32 su kien", seeded.stdout)
+        self.assertIn("4 tài khoản mẫu và 32 sự kiện", seeded.stdout)
         again = self.run_cli("seed-demo", "--password", "Demo-temp-pass-123")
         self.assertEqual(again.returncode, 0, again.stderr)
-        self.assertIn("0 tai khoan mau va 0 su kien", again.stdout)
+        self.assertIn("0 tài khoản mẫu và 0 sự kiện", again.stdout)
         with LogStore(self.db) as store:
             self.assertEqual(store.count(), 32)
             self.assertEqual(len(store.list_users()), 5)
