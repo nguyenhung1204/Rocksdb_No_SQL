@@ -26,7 +26,7 @@
 
 | Thành viên | Vai trò | Việc chính | Sản phẩm bàn giao |
 |---|---|---|---|
-| **TV1 – Nhóm trưởng** | Lõi lưu trữ | Thiết kế key schema + 6 column family; viết/giải thích `logstore/store.py`; viết test; tuning option | `logstore/store.py`, `tests/unit/`, chương "Thiết kế hệ thống" + "Cài đặt lõi" |
+| **TV1 – Nhóm trưởng** | Lõi lưu trữ | Thiết kế key schema + 7 column family; viết/giải thích `logstore/store.py`; viết test; tuning option | `logstore/store.py`, `tests/unit/`, chương "Thiết kế hệ thống" + "Cài đặt lõi" |
 | **TV2** | Ứng dụng & demo | CLI (`cli.py`), web (`webapp/`, `templates/`), sinh dữ liệu (`logstore/gen.py`); quay/chụp demo; làm slide | `cli.py`, `webapp/`, chương "Ứng dụng minh họa", slide + kịch bản demo |
 | **TV3** | Nghiên cứu & đánh giá | Lý thuyết NoSQL/KV/RocksDB/LSM; benchmark (`bench.py`); so sánh với SQLite; tổng hợp báo cáo | `bench.py`, bảng/biểu đồ số liệu, chương "Cơ sở lý thuyết" + "Đánh giá", bản báo cáo hoàn chỉnh |
 
@@ -98,7 +98,7 @@ Luôn chạy trong thư mục gốc dự án, nơi có `app.py`. Trong các ví 
 |---|---|---|
 | Chạy test | `python -m unittest discover -s tests -v` | Tất cả kiểm thử lõi, web và CLI kết thúc bằng `OK` |
 | Sinh 100k log | `python cli.py gen --n 100000` | In số sự kiện/giây |
-| Xem thống kê | `python cli.py stats` | Bảng số key, SST, memtable theo 6 column family |
+| Xem thống kê | `python cli.py stats` | Bảng số key, SST, memtable theo 7 column family |
 | Đếm theo mức | `python cli.py count` | DEBUG/INFO/WARN/ERROR/FATAL |
 | Lỗi 2 giờ qua | `python cli.py query --last 2h --level ERROR` | Danh sách + thời gian truy vấn (ms) |
 | Theo nguồn + từ khóa | `python cli.py query --source payment-service --contains cham` | Log của service đó có chữ "cham" |
@@ -125,7 +125,7 @@ Web và REST API yêu cầu đăng nhập; các thao tác ghi cần CSRF token. 
 
 ## 6. Thiết kế (phần cốt lõi, TV1 phải nắm chắc)
 
-### 6.1 Sáu column family
+### 6.1 Bảy column family
 
 | Column family | Key | Value | Vai trò |
 |---|---|---|---|
@@ -135,6 +135,7 @@ Web và REST API yêu cầu đăng nhập; các thao tác ghi cần CSRF token. 
 | `idx_trace` | `trace_id + 0x00 + event_id` | rỗng | Truy vấn theo trace |
 | `meta` | `source`, `\x00count:*` | `1`, bộ đếm | Danh sách nguồn và số lượng sự kiện bền vững |
 | `users` | tên đăng nhập chuẩn hóa | JSON chứa password hash, role, trạng thái | Tài khoản demo |
+| `idx_ingest` | `i  + sha256(producer + source_event_id)`, `r  + event_id` | JSON `{id, hash}` / danh sách key | Ingest retry không ghi trùng |
 
 ### 6.2 event_id = 8 byte timestamp (ms, big-endian) + 4 byte seq
 - **Big-endian** để so sánh byte-theo-byte trùng với thứ tự số → quét theo thời gian không cần sort.

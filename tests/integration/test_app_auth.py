@@ -49,6 +49,33 @@ class AppAuthTest(unittest.TestCase):
         )
         self.assertEqual(self.client.get("/setup").status_code, 302)
 
+    def test_login_throttle_returns_retry_after_then_allows_login_and_resets_account(self):
+        self.create_admin()
+        throttle = self.app.extensions["login_throttle"]
+        now = [100.0]
+        throttle.clock = lambda: now[0]
+        client = self.app.test_client()
+        page = client.get("/login")
+        csrf = self.csrf_from(page)
+
+        for _ in range(5):
+            failed = client.post("/login", data={
+                "csrf_token": csrf, "username": "admin", "password": "wrong-password",
+            })
+            self.assertEqual(failed.status_code, 401)
+        limited = client.post("/login", data={
+            "csrf_token": csrf, "username": "admin", "password": "wrong-password",
+        })
+        self.assertEqual(limited.status_code, 429)
+        self.assertGreater(int(limited.headers["Retry-After"]), 0)
+
+        now[0] += 61
+        accepted = client.post("/login", data={
+            "csrf_token": csrf, "username": "admin", "password": "strong-pass-123",
+        })
+        self.assertEqual(accepted.status_code, 302)
+        self.assertEqual(throttle.retry_after("admin", "127.0.0.1"), 0)
+
     def test_admin_dashboard_exposes_demo_operations(self):
         self.create_admin()
         response = self.client.get("/")

@@ -11,19 +11,22 @@ from datetime import datetime
 from pathlib import Path
 import re
 
-from flask import Blueprint, Response, current_app, g, jsonify, request, session, stream_with_context
+from flask import Blueprint, Response, current_app, g, jsonify, render_template, request, session, stream_with_context
 
 from logstore import LEVELS, LogStore
 from logstore.demo import seed_demo as seed_demo_data
 from logstore.gen import generate
-from logstore.store import is_internal_audit_event
+from logstore.store import (AUDIT_SOURCE, MAX_KEY_FIELD_LENGTH, MAX_TS_MS, IdempotencyConflict,
+                            is_internal_audit_event)
 from .auth import current_user, login_required, roles_required
+from .maintenance import prune_checkpoints
 
 
 api_bp = Blueprint("api", __name__)
 MAX_IMPORT_EVENTS = 100_000
 MAX_EXPORT_EVENTS = 1_000_000
 MAX_RETENTION_HOURS = 24 * 3650
+MAX_FUTURE_SKEW_MS = 24 * 3_600_000  # chap nhan dong ho nguon lech toi da 1 ngay
 BACKUP_NAME_RE = re.compile(r"^backup-[0-9]{8}-[0-9]{6}-[0-9a-f]{8}$")
 
 
@@ -51,9 +54,11 @@ def _query_integer(name, default=None):
 def _event_time(value, line=None):
     if value is None:
         return None
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > 0xFFFFFFFFFFFFFFFF:
-        where = " tai dong %d" % line if line else ""
+    where = " tai dong %d" % line if line else ""
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > MAX_TS_MS:
         raise ValueError("ts%s phai la so nguyen milliseconds khong am" % where)
+    if value > int(time.time() * 1000) + MAX_FUTURE_SKEW_MS:
+        raise ValueError("ts%s khong duoc vuot qua hien tai hon 24 gio" % where)
     return value
 
 
@@ -120,8 +125,8 @@ def events():
             raise ValueError("last_minutes phai lon hon 0 va khong qua 10 nam")
         end = int(time.time() * 1000)
         start = end - last_minutes * 60_000
-    if (start is not None and start < 0) or (end is not None and end < 0):
-        raise ValueError("start va end khong duoc am")
+    if any(value is not None and not 0 <= value <= MAX_TS_MS for value in (start, end)):
+        raise ValueError("start va end phai trong khoang 0-%d" % MAX_TS_MS)
     if start is not None and end is not None and end < start:
         raise ValueError("end phai lon hon hoac bang start")
     level = request.args.get("level") or None
@@ -133,8 +138,9 @@ def events():
     if limit < 0 or limit > 1000:
         raise ValueError("limit phai trong khoang 0-1000")
     source, trace_id, contains = (request.args.get(key) or None for key in ("source", "trace_id", "q"))
-    if any(value and len(value) > 256 for value in (source, trace_id)):
-        raise ValueError("source va trace_id toi da 256 ky tu")
+    if any(value and len(value) > MAX_KEY_FIELD_LENGTH for value in (source, trace_id)):
+        raise ValueError("source va trace_id toi da %d ky tu" % MAX_KEY_FIELD_LENGTH)
+    exclude_audit = request.args.get("hide_audit") in {"1", "true"}
     if contains and len(contains) > 500:
         raise ValueError("q toi da 500 ky tu")
     started = time.perf_counter()
@@ -142,7 +148,7 @@ def events():
     cursor = _event_key(cursor_value) if cursor_value else None
     rows = store.query(start_ms=start, end_ms=end, level=level, source=source,
                        trace_id=trace_id, contains=contains, limit=limit + (1 if limit else 0),
-                       before_id=cursor)
+                       before_id=cursor, exclude_audit=exclude_audit)
     has_more = bool(limit and len(rows) > limit)
     if has_more:
         rows = rows[:limit]
@@ -154,23 +160,92 @@ def events():
 
 @api_bp.post("/api/ingest")
 def ingest():
-    token = current_app.config.get("INGEST_TOKEN")
     supplied = request.headers.get("Authorization", "")
-    token_matches = (
-        isinstance(token, str) and bool(token.strip()) and supplied.startswith("Bearer ")
-        and hmac.compare_digest(supplied[7:].encode("utf-8"), token.encode("utf-8"))
-    )
-    if not token_matches:
+    candidate = supplied[7:] if supplied.startswith("Bearer ") else ""
+    producer_id = None
+    configured_tokens = current_app.config.get("INGEST_TOKENS") or {}
+    for configured_producer, configured_token in configured_tokens.items():
+        token_matches = hmac.compare_digest(candidate.encode("utf-8"), configured_token.encode("utf-8"))
+        if token_matches:
+            producer_id = configured_producer
+    legacy_token = current_app.config.get("INGEST_TOKEN")
+    if not configured_tokens and isinstance(legacy_token, str) and legacy_token.strip():
+        if hmac.compare_digest(candidate.encode("utf-8"), legacy_token.encode("utf-8")):
+            producer_id = "legacy"
+    if producer_id is None:
         return jsonify({"error": "token ingest khong hop le hoac chua duoc cau hinh"}), 401
+    g.audit_actor = "ingest:%s" % producer_id
     body = request.get_json(silent=True)
     if body is None:
         raise ValueError("body phai la JSON")
     records = body if isinstance(body, list) else [body]
     if not records or len(records) > MAX_IMPORT_EVENTS:
         raise ValueError("so su kien phai trong khoang 1-100000")
+    source_event_ids = []
+    for record in records:
+        if not isinstance(record, dict) or "source_event_id" not in record:
+            raise ValueError("moi su kien can co source_event_id")
+        source_event_ids.append(record["source_event_id"])
     batch = _event_batch(records, _store())
-    ids = _store().put_many(batch)
-    return jsonify({"written": len(ids), "ids": [event_id.hex() for event_id in ids]}), 201
+    try:
+        ids, written = _store().put_ingested_many(batch, producer_id, source_event_ids)
+    except IdempotencyConflict as error:
+        return jsonify({"error": str(error)}), 409
+    return jsonify({"written": written, "duplicates": len(ids) - written,
+                    "ids": [event_id.hex() for event_id in ids]}), 201
+
+
+@api_bp.get("/audit")
+@roles_required("admin")
+def audit_page():
+    return render_template("audit.html", user=current_user())
+
+
+@api_bp.get("/api/audit")
+@roles_required("admin")
+def audit_events():
+    limit = _query_integer("limit", 50)
+    if limit < 1 or limit > 100:
+        raise ValueError("limit phai trong khoang 1-100")
+    cursor_text = request.args.get("cursor")
+    cursor = _event_key(cursor_text) if cursor_text else None
+    store = _store()
+    events = []
+    scanned = 0
+    scan_cursor = cursor
+    scan_budget = 5000
+    batch_size = 250
+    exhausted = False
+
+    while scanned < scan_budget and len(events) <= limit:
+        requested = min(batch_size, scan_budget - scanned)
+        rows = store.query(source=AUDIT_SOURCE, limit=requested, before_id=scan_cursor)
+        if not rows:
+            exhausted = True
+            break
+        for event in rows:
+            scan_cursor = bytes.fromhex(event["id"])
+            scanned += 1
+            if is_internal_audit_event(event):
+                fields = event.get("fields") or {}
+                events.append({
+                    "id": event["id"], "ts": event["ts"],
+                    "actor": fields["actor"], "action": fields["action"],
+                    "target": fields.get("target"), "status": fields["status"],
+                })
+                if len(events) > limit:
+                    return jsonify({"count": limit, "events": events[:limit], "has_more": True,
+                                    "next_cursor": events[limit - 1]["id"]})
+        if len(rows) < requested:
+            exhausted = True
+            break
+
+    more_raw_rows = False
+    if not exhausted and scan_cursor is not None:
+        more_raw_rows = bool(store.query(source=AUDIT_SOURCE, limit=1, before_id=scan_cursor))
+    has_more = more_raw_rows
+    return jsonify({"count": len(events), "events": events, "has_more": has_more,
+                    "next_cursor": scan_cursor.hex() if has_more and scan_cursor else None})
 
 
 @api_bp.get("/api/events/<event_id>")
@@ -374,6 +449,12 @@ def create_backup():
     store = _store()
     store.flush()
     store.backup(str(target))
+    keep_count = current_app.config.get("BACKUP_RETENTION_COUNT", 0)
+    if keep_count:
+        try:
+            prune_checkpoints(root, keep_count, newest_path=target)
+        except Exception:
+            current_app.logger.warning("Checkpoint rotation failed after backup %s was created", name, exc_info=True)
     return jsonify({"name": name, "path": str(target)}), 201
 
 

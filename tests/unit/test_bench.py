@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -25,6 +26,31 @@ class BenchmarkTest(unittest.TestCase):
     def test_query_percentile_summary_reports_observation_count(self):
         result = bench.latency_summary([1, 2, 3, 4, 100])
         self.assertEqual(result, {"samples": 5, "p50": 3, "p95": 100, "p99": 100})
+
+    def test_sqlite_keyword_search_uses_literal_substrings(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = bench.SqliteStore(os.path.join(root, "bench.db"))
+            try:
+                store.put_many([
+                    ("INFO", "svc", "UPSTREAM TIMEOUT", {}, 1),
+                    ("INFO", "svc", "literal 100% complete", {}, 2),
+                    ("INFO", "svc", "other", {}, 3),
+                ])
+                self.assertEqual(len(store.contains_query("timeout")), 1)
+                self.assertEqual(len(store.contains_query("100%")), 1)
+            finally:
+                store.close()
+
+    def test_keyword_search_benchmark_reports_observed_samples_and_match_counts(self):
+        result = bench.keyword_search_summary(
+            lambda term, limit: [term, limit], lambda term, limit: [term],
+            keyword="timeout", repeats=4, limit=2,
+        )
+        self.assertEqual(result["keyword"], "timeout")
+        self.assertEqual(result["rocksdb"]["samples"], 4)
+        self.assertEqual(result["sqlite"]["samples"], 4)
+        self.assertEqual(result["rocksdb"]["returned_rows"], 2)
+        self.assertEqual(result["sqlite"]["returned_rows"], 1)
 
 
 if __name__ == "__main__":

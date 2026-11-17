@@ -14,24 +14,28 @@ def main():
     events = [
         {
             "level": "INFO",
+            "source_event_id": "ORDER-2026-1042-checkout-started",
             "source": "checkout-service",
             "msg": "Order checkout started",
             "fields": {"trace_id": "ORDER-2026-1042", "order_id": "ORD-1042", "user_id": "USR-018"},
         },
         {
             "level": "WARN",
+            "source_event_id": "ORDER-2026-1042-payment-attempt-1",
             "source": "payment-service",
             "msg": "Payment provider timed out; retry scheduled",
             "fields": {"trace_id": "ORDER-2026-1042", "order_id": "ORD-1042", "attempt": 1},
         },
         {
             "level": "INFO",
+            "source_event_id": "ORDER-2026-1042-payment-attempt-2",
             "source": "payment-service",
             "msg": "Payment completed",
             "fields": {"trace_id": "ORDER-2026-1042", "order_id": "ORD-1042", "attempt": 2},
         },
         {
             "level": "INFO",
+            "source_event_id": "ORDER-2026-1042-order-confirmed",
             "source": "order-service",
             "msg": "Order confirmed",
             "fields": {"trace_id": "ORDER-2026-1042", "order_id": "ORD-1042", "status": "confirmed"},

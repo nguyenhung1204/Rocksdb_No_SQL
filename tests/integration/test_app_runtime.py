@@ -101,3 +101,31 @@ class AppRuntimeTest(unittest.TestCase):
             "confirm_password": "smoke-test-password-123",
         })
         self.assertEqual(response.status_code, 302)
+
+    def test_ingest_producer_credentials_load_from_environment_mapping(self):
+        with patch.dict(os.environ, {
+            "LOGSTORE_INGEST_TOKENS": '{"collector-a":"secret-a","collector-b":"secret-b"}',
+        }, clear=True):
+            app = self.create_app("ingest-token-map")
+
+        self.assertEqual(app.config["INGEST_TOKENS"], {
+            "collector-a": "secret-a", "collector-b": "secret-b",
+        })
+        self.assertIsNone(app.config["INGEST_TOKEN"])
+
+    def test_ambiguous_ingest_token_environment_is_rejected_before_db_open(self):
+        db_path = os.path.join(self.root, "ambiguous-ingest-tokens")
+        with patch.dict(os.environ, {
+            "LOGSTORE_INGEST_TOKENS": '{"collector-a":"secret-a"}',
+            "LOGSTORE_INGEST_TOKEN": "legacy-secret",
+        }, clear=True):
+            with self.assertRaisesRegex(ValueError, "LOGSTORE_INGEST_TOKEN"):
+                create_app(db_path=db_path, backup_path=db_path + "-backups")
+        self.assertFalse(os.path.exists(db_path))
+
+    def test_invalid_retention_settings_are_rejected_before_db_open(self):
+        db_path = os.path.join(self.root, "invalid-retention-setting")
+        with patch.dict(os.environ, {"LOGSTORE_RETENTION_HOURS": "forever"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "LOGSTORE_RETENTION_HOURS"):
+                create_app(db_path=db_path, backup_path=db_path + "-backups")
+        self.assertFalse(os.path.exists(db_path))

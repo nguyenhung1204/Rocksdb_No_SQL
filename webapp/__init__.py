@@ -8,9 +8,15 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from flask import Flask, g, jsonify, request, session
-from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
 from logstore import LogStore
+from .maintenance import retention_settings
+from .login_throttle import LoginThrottle
+
+
+# Setup/login ghi audit qua g.audit_event de khong ghi nham redirect hoac lan that bai.
+EXPLICIT_AUDIT_ENDPOINTS = {"auth.setup", "auth.login"}
 
 
 class StoreLifecycleLock:
@@ -77,6 +83,27 @@ def _cookie_secure_setting(runtime_environment):
     raise ValueError("LOGSTORE_COOKIE_SECURE phai la true hoac false")
 
 
+def _ingest_credentials_from_environment():
+    raw_mapping = os.environ.get("LOGSTORE_INGEST_TOKENS")
+    legacy_token = os.environ.get("LOGSTORE_INGEST_TOKEN")
+    if raw_mapping is not None and legacy_token and legacy_token.strip():
+        raise ValueError("chi duoc cau hinh LOGSTORE_INGEST_TOKENS hoac LOGSTORE_INGEST_TOKEN")
+    if raw_mapping is None:
+        return {}, legacy_token
+    try:
+        mapping = json.loads(raw_mapping)
+    except json.JSONDecodeError as error:
+        raise ValueError("LOGSTORE_INGEST_TOKENS phai la JSON object hop le") from error
+    if not isinstance(mapping, dict) or not mapping or len(mapping) > 128:
+        raise ValueError("LOGSTORE_INGEST_TOKENS phai la object co 1-128 producer")
+    if any(not isinstance(name, str) or not name.strip() or len(name) > 128 or "\x00" in name
+           or not isinstance(token, str) or not token.strip() for name, token in mapping.items()):
+        raise ValueError("ten producer va token ingest khong duoc rong hoac vuot gioi han")
+    if len(set(mapping.values())) != len(mapping):
+        raise ValueError("token trong LOGSTORE_INGEST_TOKENS phai duy nhat")
+    return mapping, None
+
+
 def create_app(db_path=None, backup_path=None, secret_key=None):
     runtime_environment = os.environ.get("LOGSTORE_ENV", "development").strip().lower()
     configured_secret = secret_key if secret_key is not None else os.environ.get("LOGSTORE_SECRET_KEY")
@@ -85,6 +112,8 @@ def create_app(db_path=None, backup_path=None, secret_key=None):
     ):
         raise RuntimeError("LOGSTORE_SECRET_KEY phai co it nhat 32 ky tu trong production")
     secure_cookie = _cookie_secure_setting(runtime_environment)
+    ingest_tokens, legacy_ingest_token = _ingest_credentials_from_environment()
+    maintenance = retention_settings()
 
     explicit_db_path = db_path is not None or bool(os.environ.get("LOGSTORE_PATH"))
     db_path = Path(db_path or os.environ.get("LOGSTORE_PATH", "data/webdb")).resolve()
@@ -110,7 +139,11 @@ def create_app(db_path=None, backup_path=None, secret_key=None):
         LOGSTORE_PATH=str(db_path),
         BACKUP_PATH=str(backup_path),
         STATE_PATH=str(state_path),
-        INGEST_TOKEN=os.environ.get("LOGSTORE_INGEST_TOKEN"),
+        INGEST_TOKEN=legacy_ingest_token,
+        INGEST_TOKENS=ingest_tokens,
+        RETENTION_HOURS=maintenance["hours"],
+        RETENTION_INTERVAL_SECONDS=maintenance["interval_seconds"],
+        BACKUP_RETENTION_COUNT=maintenance["backup_count"],
         MAX_CONTENT_LENGTH=10 * 1024 * 1024,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
@@ -120,6 +153,7 @@ def create_app(db_path=None, backup_path=None, secret_key=None):
     app.extensions["store_lock"] = threading.RLock()
     app.extensions["store_lifecycle_lock"] = StoreLifecycleLock()
     app.extensions["account_lock"] = threading.RLock()
+    app.extensions["login_throttle"] = LoginThrottle()
 
     def persist_active_paths(active_path, active_backup_path):
         state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -180,16 +214,21 @@ def create_app(db_path=None, backup_path=None, secret_key=None):
             "api.restore_backup": "backup.restore",
             "api.ingest": "event.ingest",
         }
-        action = action_by_endpoint.get(request.endpoint) if request.method in {"POST", "PUT", "PATCH", "DELETE"} else None
-        if action and 200 <= response.status_code < 400:
-            try:
-                target = next(iter((request.view_args or {}).values()), None)
-                app.extensions["logstore"].put_audit(
-                    session.get("username") or getattr(g, "audit_actor", None) or "ingest-service",
-                    action, target, response.status_code,
-                )
-            except Exception:
-                app.logger.exception("Could not write audit event for %s", action)
+        explicit = getattr(g, "audit_event", None)
+        if explicit is not None:
+            # View tu quyet dinh: chi ghi khi thao tac that su xay ra (setup/login).
+            action, actor, target, status = explicit
+        else:
+            action = action_by_endpoint.get(request.endpoint) if request.method in {"POST", "PUT", "PATCH", "DELETE"} else None
+            if request.endpoint in EXPLICIT_AUDIT_ENDPOINTS or not action or not 200 <= response.status_code < 400:
+                return response
+            actor = getattr(g, "audit_actor", None) or session.get("username") or "anonymous"
+            target = next(iter((request.view_args or {}).values()), None)
+            status = response.status_code
+        try:
+            app.extensions["logstore"].put_audit(actor, action, target, status)
+        except Exception:
+            app.logger.exception("Could not write audit event for %s", action)
         return response
 
     @app.teardown_request
@@ -206,9 +245,24 @@ def create_app(db_path=None, backup_path=None, secret_key=None):
     def invalid_request(error):
         return jsonify({"error": str(error)}), 400
 
+    from logstore.store import IdempotencyConflict
+
+    @app.errorhandler(IdempotencyConflict)
+    def idempotency_conflict(error):
+        return jsonify({"error": str(error)}), 409
+
     @app.errorhandler(RequestEntityTooLarge)
     def request_too_large(_error):
         return jsonify({"error": "Yeu cau vuot qua gioi han 10 MB"}), 413
+
+    @app.errorhandler(Exception)
+    def unexpected_error(error):
+        if isinstance(error, HTTPException):
+            return error
+        app.logger.exception("Unhandled error on %s %s", request.method, request.path)
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "loi he thong; xem log ung dung"}), 500
+        return "Loi he thong", 500
 
     @app.errorhandler(404)
     def not_found(_error):

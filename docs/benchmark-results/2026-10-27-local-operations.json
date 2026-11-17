@@ -1,0 +1,130 @@
+{
+  "metadata": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "os": "Windows",
+    "os_release": "11",
+    "architecture": "AMD64",
+    "cpu_model": "Intel64 Family 6 Model 186 Stepping 2, GenuineIntel",
+    "logical_cpu_count": 12,
+    "memory_total_bytes": 16674521088,
+    "python": "3.12.14",
+    "events": 200000,
+    "single_write_events": 1000,
+    "query_repeats": 100,
+    "independent_write_trials": 3,
+    "batch_size": 1000,
+    "sqlite_journal_mode": "WAL",
+    "sqlite_synchronous": "NORMAL",
+    "rocksdb_fsync_per_write": false,
+    "keyword_search": "literal case-insensitive ASCII substring scan; limit=100; keyword=timeout",
+    "keyword_search_dataset_events": 201000,
+    "keyword_search_limit": 100,
+    "keyword_search_may_stop_after_limit": true
+  },
+  "write_batch_1000_events_per_s": {
+    "rocksdb": 75973.98650785376,
+    "sqlite": 97557.08284281948
+  },
+  "write_batch_1000_events_per_s_repeated": {
+    "rocksdb": {
+      "min": 70713.68636560075,
+      "median": 75081.16837485213,
+      "max": 81445.2724224377,
+      "samples": 3
+    },
+    "sqlite": {
+      "min": 92574.21489496734,
+      "median": 98443.39822092294,
+      "max": 101483.67612241917,
+      "samples": 3
+    }
+  },
+  "write_single_events_per_s": {
+    "rocksdb": 22143.489823968124,
+    "sqlite": 7500.586918410005
+  },
+  "range_10min_limit100_ms": {
+    "rocksdb": 0.502450013300404,
+    "sqlite": 0.2742999931797385
+  },
+  "range_10min_limit100_ms_percentiles_ms": {
+    "rocksdb": {
+      "samples": 100,
+      "p50": 0.4951999871991575,
+      "p95": 0.7940999930724502,
+      "p99": 0.8885000133886933
+    },
+    "sqlite": {
+      "samples": 100,
+      "p50": 0.27190003311261535,
+      "p95": 0.4230000195093453,
+      "p99": 0.5283000064082444
+    }
+  },
+  "level>=ERROR_10min_ms": {
+    "rocksdb": 0.6032499950379133,
+    "sqlite": 0.7765000336803496
+  },
+  "level>=ERROR_10min_ms_percentiles_ms": {
+    "rocksdb": {
+      "samples": 100,
+      "p50": 0.5996000254526734,
+      "p95": 1.191499992273748,
+      "p99": 1.3927000109106302
+    },
+    "sqlite": {
+      "samples": 100,
+      "p50": 0.7759000291116536,
+      "p95": 1.1337999603711069,
+      "p99": 1.3011000119149685
+    }
+  },
+  "source_10min_ms": {
+    "rocksdb": 0.7552000170107931,
+    "sqlite": 0.3459499857854098
+  },
+  "source_10min_ms_percentiles_ms": {
+    "rocksdb": {
+      "samples": 100,
+      "p50": 0.7531000301241875,
+      "p95": 1.2912999955005944,
+      "p99": 2.1391999907791615
+    },
+    "sqlite": {
+      "samples": 100,
+      "p50": 0.34579995553940535,
+      "p95": 0.5894999485462904,
+      "p99": 0.6950999959371984
+    }
+  },
+  "message_substring_scan_ms": {
+    "keyword": "timeout",
+    "limit": 100,
+    "rocksdb": {
+      "samples": 100,
+      "p50": 100.58159998152405,
+      "p95": 171.14630003925413,
+      "p99": 205.38489997852594,
+      "returned_rows": 100
+    },
+    "sqlite": {
+      "samples": 100,
+      "p50": 17.3318000161089,
+      "p95": 29.13590002572164,
+      "p99": 38.86869997950271,
+      "returned_rows": 100
+    }
+  },
+  "point_get_us": {
+    "rocksdb": 8.790549996774644,
+    "sqlite": 20.844949991442263
+  },
+  "disk_mb": {
+    "rocksdb": 19.725667,
+    "sqlite": 35.20512
+  },
+  "purge_half_ms": {
+    "rocksdb": 1334.0219000237994,
+    "sqlite": 820.4467999748886
+  }
+}

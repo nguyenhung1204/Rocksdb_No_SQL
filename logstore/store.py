@@ -16,6 +16,7 @@ sap xep) quet theo khoang thoi gian rat nhanh, khong can sort lai.
 """
 
 import gc
+import hashlib
 import heapq
 import json
 import os
@@ -38,11 +39,16 @@ from rocksdict import (
 LEVELS = ["DEBUG", "INFO", "WARN", "ERROR", "FATAL"]
 LEVEL_NUM = {name: i for i, name in enumerate(LEVELS)}
 
+
+class IdempotencyConflict(ValueError):
+    """A producer reused a source event ID for different event content."""
+
 CF_INDEX_LEVEL = "idx_level"
 CF_INDEX_SOURCE = "idx_source"
 CF_INDEX_TRACE = "idx_trace"
 CF_META = "meta"
 CF_USERS = "users"
+CF_INGEST = "idx_ingest"
 META_COUNT_VERSION = b"\x00count:version"
 META_COUNT_TOTAL = b"\x00count:total"
 META_COUNT_LEVEL = b"\x00count:level:"
@@ -51,6 +57,10 @@ ID_STRUCT = struct.Struct(">QI")  # 8 byte ts_ms + 4 byte seq
 ID_LEN = ID_STRUCT.size  # 12
 MIN_ID = ID_STRUCT.pack(0, 0)
 AUDIT_SOURCE = "audit-service"
+# 9999-12-31T23:59:59.999Z: moc tren cho timestamp de query/retention luon nhin thay su kien
+MAX_TS_MS = 253_402_300_799_999
+MAX_KEY_FIELD_LENGTH = 256  # source va trace_id nam trong key index
+MAX_LATE_SEQUENCE_CACHE = 10_000
 
 
 def is_internal_audit_event(event):
@@ -133,6 +143,7 @@ class LogStore:
             CF_INDEX_TRACE: _base_options(),
             CF_META: _base_options(),
             CF_USERS: _base_options(),
+            CF_INGEST: _base_options(),
         }
         self.db = Rdict(path, db_opts, column_families=cfs)
         self.cf_level = self.db.get_column_family(CF_INDEX_LEVEL)
@@ -140,12 +151,14 @@ class LogStore:
         self.cf_trace = self.db.get_column_family(CF_INDEX_TRACE)
         self.cf_meta = self.db.get_column_family(CF_META)
         self.cf_users = self.db.get_column_family(CF_USERS)
+        self.cf_ingest = self.db.get_column_family(CF_INGEST)
         self.h_default = self.db.get_column_family_handle("default")
         self.h_level = self.db.get_column_family_handle(CF_INDEX_LEVEL)
         self.h_source = self.db.get_column_family_handle(CF_INDEX_SOURCE)
         self.h_trace = self.db.get_column_family_handle(CF_INDEX_TRACE)
         self.h_meta = self.db.get_column_family_handle(CF_META)
         self.h_users = self.db.get_column_family_handle(CF_USERS)
+        self.h_ingest = self.db.get_column_family_handle(CF_INGEST)
 
         wo = WriteOptions()
         wo.sync = bool(sync_writes)
@@ -239,6 +252,8 @@ class LogStore:
             raise ValueError("level phai thuoc %s" % LEVELS)
         if not isinstance(source, str) or not source or "\x00" in source:
             raise ValueError("source khong duoc rong va khong chua ky tu NUL")
+        if len(source) > MAX_KEY_FIELD_LENGTH:
+            raise ValueError("source toi da %d ky tu" % MAX_KEY_FIELD_LENGTH)
         if not isinstance(msg, str):
             raise ValueError("msg phai la chuoi")
         if fields is not None and not isinstance(fields, dict):
@@ -246,6 +261,20 @@ class LogStore:
         trace_id = (fields or {}).get("trace_id")
         if trace_id is not None and (not isinstance(trace_id, str) or "\x00" in trace_id):
             raise ValueError("fields.trace_id phai la chuoi khong chua ky tu NUL")
+        if trace_id is not None and len(trace_id) > MAX_KEY_FIELD_LENGTH:
+            raise ValueError("fields.trace_id toi da %d ky tu" % MAX_KEY_FIELD_LENGTH)
+
+    @staticmethod
+    def _check_ts(ts_ms):
+        if (not isinstance(ts_ms, int) or isinstance(ts_ms, bool)
+                or not 0 <= ts_ms <= MAX_TS_MS):
+            raise ValueError("ts phai la so nguyen milliseconds trong khoang 0-%d" % MAX_TS_MS)
+
+    def _trim_late_sequences(self):
+        # Chi goi truoc khi cap ID cho mot batch moi: trong batch, cache phai giu
+        # nguyen vi cac ID chua duoc ghi xuong DB de do lai.
+        if len(self._late_sequences) > MAX_LATE_SEQUENCE_CACHE:
+            self._late_sequences.clear()
 
     def _add_to_batch(self, wb, event_id, level, source, msg, fields):
         value = json.dumps(
@@ -275,6 +304,108 @@ class LogStore:
         """
         return self._write_events(events)
 
+    def put_ingested_many(self, events, producer_id, source_event_ids):
+        """Atomically store producer-scoped idempotent events.
+
+        Returns ``(event_ids, newly_written_count)`` in input order. A source ID
+        remains reserved until its event is explicitly deleted or retained away.
+        """
+        if not isinstance(producer_id, str) or not producer_id or "\x00" in producer_id:
+            raise ValueError("producer_id khong hop le")
+        if len(events) != len(source_event_ids):
+            raise ValueError("source_event_id bi thieu")
+        keys = []
+        hashes = []
+        prefix = producer_id.encode("utf-8") + b"\x00"
+        for event, source_event_id in zip(events, source_event_ids):
+            if (not isinstance(source_event_id, str) or not source_event_id.strip()
+                    or len(source_event_id) > 512 or "\x00" in source_event_id):
+                raise ValueError("source_event_id phai la chuoi 1-512 ky tu")
+            level, source, msg, fields, ts_ms = event
+            self._check_event(level, source, msg, fields)
+            if ts_ms is not None:
+                self._check_ts(ts_ms)
+            canonical = json.dumps(
+                {"level": level, "source": source, "msg": msg,
+                 "fields": fields or {}, "ts": ts_ms},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")
+            hashes.append(hashlib.sha256(canonical).hexdigest().encode("ascii"))
+            keys.append(b"i\x00" + hashlib.sha256(prefix + source_event_id.encode("utf-8")).digest())
+
+        ids = [None] * len(events)
+        written = 0
+        new_entries = {}
+        new_events = {}
+        reverse_entries = {}
+        with self._lock:
+            self._trim_late_sequences()
+            for index, (event, key, payload_hash) in enumerate(zip(events, keys, hashes)):
+                entry = new_entries.get(key)
+                if entry is not None and entry["hash"].encode("ascii") != payload_hash:
+                    raise IdempotencyConflict("source_event_id da duoc dung voi noi dung khac")
+                if entry is None:
+                    raw = self.cf_ingest.get(key)
+                    if raw is not None:
+                        entry = json.loads(raw.decode("utf-8"))
+                        if entry.get("hash", "").encode("ascii") != payload_hash:
+                            raise IdempotencyConflict("source_event_id da duoc dung voi noi dung khac")
+                        event_id = bytes.fromhex(entry["id"])
+                        if self.db.get(event_id) is None:
+                            raise RuntimeError("idempotency mapping points to a missing event")
+                    else:
+                        level, source, msg, fields, ts_ms = event
+                        if ts_ms is None:
+                            ts_ms = int(time.time() * 1000)
+                        event_id, _ = self._next_id(ts_ms)
+                        entry = {"id": event_id.hex(), "hash": payload_hash.decode("ascii")}
+                        new_entries[key] = entry
+                        reverse_entries.setdefault(event_id, []).append(key)
+                        new_events[event_id] = event
+                        written += 1
+                        ids[index] = event_id
+                        continue
+                ids[index] = bytes.fromhex(entry["id"])
+
+            if written:
+                wb = WriteBatch(raw_mode=True)
+                new_sources = set()
+                level_deltas = dict.fromkeys(LEVELS, 0)
+                for event_id, event in new_events.items():
+                    level, source, msg, fields, ts_ms = event
+                    self._check_event(level, source, msg, fields)
+                    if is_internal_audit_event({"source": source, "fields": fields}):
+                        raise ValueError("_audit is reserved for system audit records")
+                    self._add_to_batch(wb, event_id, level, source, msg, fields)
+                    if source not in self._known_sources:
+                        new_sources.add(source)
+                    level_deltas[level] += 1
+                    keys_for_event = reverse_entries[event_id]
+                    for key in keys_for_event:
+                        entry = new_entries[key]
+                        wb.put(key, json.dumps(entry, separators=(",", ":")).encode("utf-8"), self.h_ingest)
+                    wb.put(b"r\x00" + event_id, json.dumps(
+                        [key.hex() for key in keys_for_event], separators=(",", ":")
+                    ).encode("ascii"), self.h_ingest)
+                updated_total, updated_counts = self._count_delta_batch(wb, written, level_deltas)
+                self.db.write(wb)
+                self._known_sources |= new_sources
+                self._total_events, self._event_counts = updated_total, updated_counts
+        return ids, written
+
+    def _delete_ingest_mapping(self, wb, event_id):
+        reverse_key = b"r\x00" + event_id
+        raw = self.cf_ingest.get(reverse_key)
+        if raw is None:
+            return
+        try:
+            keys = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError("invalid ingest reverse mapping") from error
+        for key in keys:
+            wb.delete(bytes.fromhex(key), self.h_ingest)
+        wb.delete(reverse_key, self.h_ingest)
+
     def put_audit(self, actor, action, target=None, status=200):
         """Append an immutable web action record to the normal event stream."""
         fields = {"_audit": True, "actor": actor, "action": action, "status": status}
@@ -289,8 +420,11 @@ class LogStore:
         new_sources = set()
         level_deltas = dict.fromkeys(LEVELS, 0)
         with self._lock:
+            self._trim_late_sequences()
             for level, source, msg, fields, ts_ms in events:
                 self._check_event(level, source, msg, fields)
+                if ts_ms is not None:
+                    self._check_ts(ts_ms)
                 event = {"source": source, "fields": fields}
                 if is_internal_audit_event(event) and not allow_audit:
                     raise ValueError("_audit is reserved for system audit records")
@@ -374,7 +508,7 @@ class LogStore:
 
     def query(self, start_ms=None, end_ms=None, level=None, source=None,
               contains=None, limit=100, reverse=True, trace_id=None,
-              before_id=None, after_id=None):
+              before_id=None, after_id=None, exclude_audit=False):
         """
         Truy van su kien.
           start_ms, end_ms : khoang thoi gian [start, end] (ms), None = khong gioi han
@@ -384,6 +518,7 @@ class LogStore:
           contains         : loc chuoi con trong msg (loc sau, khong co index!)
           limit            : so ban ghi toi da
           reverse          : True = moi nhat truoc
+          exclude_audit    : True = bo qua ban ghi audit he thong
         """
         if limit < 0:
             raise ValueError("limit khong duoc am")
@@ -392,8 +527,9 @@ class LogStore:
         if before_id and after_id:
             raise ValueError("before_id va after_id khong the dung cung luc")
 
-        lo = make_id(max(start_ms, 0) if start_ms is not None else 0, 0)
-        hi = make_id((end_ms + 1) if end_ms is not None else 0xFFFFFFFFFFFFFFF, 0)
+        lo, hi = self._time_bounds(start_ms, end_ms)
+        if lo >= hi:
+            return []
         if before_id:
             hi = min(hi, self._validate_cursor(before_id))
         elif after_id:
@@ -434,10 +570,21 @@ class LogStore:
                 continue
             if contains and contains.lower() not in ev["msg"].lower():
                 continue
+            if exclude_audit and is_internal_audit_event(ev):
+                continue
             out.append(ev)
             if len(out) >= limit:
                 break
         return out
+
+    @staticmethod
+    def _time_bounds(start_ms, end_ms):
+        """Doi [start_ms, end_ms] thanh khoang key [lo, hi), kep vao [0, MAX_TS_MS]."""
+        start = 0 if start_ms is None else max(start_ms, 0)
+        end = MAX_TS_MS if end_ms is None else min(end_ms, MAX_TS_MS)
+        if start > end:
+            return MIN_ID, MIN_ID
+        return make_id(start, 0), make_id(end + 1, 0)
 
     @staticmethod
     def _validate_cursor(cursor):
@@ -505,6 +652,7 @@ class LogStore:
             trace_id = old["fields"].get("trace_id")
             if trace_id:
                 wb.delete(trace_id.encode("utf-8") + b"\x00" + event_id, self.h_trace)
+            self._delete_ingest_mapping(wb, event_id)
             updated_total, updated_counts = self._count_delta_batch(wb, -1, {old["level"]: -1})
             self.db.write(wb)
             self._total_events, self._event_counts = updated_total, updated_counts
@@ -551,8 +699,9 @@ class LogStore:
         """Dem su kien tong truc tiep; truy van theo khoang quet index."""
         if start_ms is None and end_ms is None:
             return self._event_counts[level_exact] if level_exact else self._total_events
-        lo = make_id(start_ms or 0, 0)
-        hi = make_id((end_ms + 1) if end_ms is not None else 0xFFFFFFFFFFFFFFF, 0)
+        lo, hi = self._time_bounds(start_ms, end_ms)
+        if lo >= hi:
+            return 0
         if level_exact:
             cf, prefix = self.cf_level, bytes([LEVEL_NUM[level_exact]])
             lo, hi = prefix + lo, prefix + hi
@@ -613,6 +762,10 @@ class LogStore:
                 for src in self._known_sources:
                     p = src.encode("utf-8") + b"\x00"
                     wb.delete_range(p + MIN_ID, p + cutoff, self.h_source)
+                # Mapping nguoc "r\0" + event_id cung sap xep theo thoi gian: chi quet
+                # cac event da ingest trong khoang het han, khong giu moi ID trong RAM.
+                for reverse_key, _ in self._scan(self.cf_ingest, b"r\x00" + MIN_ID, b"r\x00" + cutoff):
+                    self._delete_ingest_mapping(wb, reverse_key[2:])
                 level_deltas = {level: -count for level, count in deleted_by_level.items() if count}
                 updated_total, updated_counts = self._count_delta_batch(wb, -deleted, level_deltas)
                 self.db.write(wb)
@@ -652,6 +805,7 @@ class LogStore:
                 trace_id = (record.get("fields") or {}).get("trace_id")
                 if trace_id:
                     batch.delete(trace_id.encode("utf-8") + b"\x00" + event_id, self.h_trace)
+                self._delete_ingest_mapping(batch, event_id)
                 pending_levels[record["level"]] -= 1
                 pending += 1
                 deleted += 1
@@ -688,13 +842,13 @@ class LogStore:
     def flush(self):
         """Day memtable xuong dia thanh file SST."""
         self.db.flush()
-        for cf in (self.cf_level, self.cf_source, self.cf_trace, self.cf_meta, self.cf_users):
+        for cf in (self.cf_level, self.cf_source, self.cf_trace, self.cf_meta, self.cf_users, self.cf_ingest):
             cf.flush()
 
     def compact(self):
         """Compaction thu cong: gop file SST, thuc su giai phong dung luong sau khi xoa."""
         self.db.compact_range(None, None)
-        for cf in (self.cf_level, self.cf_source, self.cf_trace, self.cf_meta, self.cf_users):
+        for cf in (self.cf_level, self.cf_source, self.cf_trace, self.cf_meta, self.cf_users, self.cf_ingest):
             cf.compact_range(None, None)
 
     def stats(self):
@@ -705,7 +859,8 @@ class LogStore:
         out = {"path": self.path, "column_families": {}}
         for name, cf in (("default", self.db), (CF_INDEX_LEVEL, self.cf_level),
                          (CF_INDEX_SOURCE, self.cf_source), (CF_INDEX_TRACE, self.cf_trace),
-                         (CF_META, self.cf_meta), (CF_USERS, self.cf_users)):
+                         (CF_META, self.cf_meta), (CF_USERS, self.cf_users),
+                         (CF_INGEST, self.cf_ingest)):
             out["column_families"][name] = {
                 "estimate_num_keys": prop(cf, "rocksdb.estimate-num-keys"),
                 "sst_size_bytes": prop(cf, "rocksdb.total-sst-files-size"),
@@ -738,10 +893,10 @@ class LogStore:
     def close(self):
         # Phai dong cac column family VA bo cac handle di thi file LOCK moi duoc nha
         # (da gap loi "lock hold by current process" khi mo lai DB neu thieu buoc nay)
-        for cf in (self.cf_level, self.cf_source, self.cf_trace, self.cf_meta, self.cf_users):
+        for cf in (self.cf_level, self.cf_source, self.cf_trace, self.cf_meta, self.cf_users, self.cf_ingest):
             cf.close()
         self.db.close()
-        self.h_default = self.h_level = self.h_source = self.h_trace = self.h_meta = self.h_users = None
+        self.h_default = self.h_level = self.h_source = self.h_trace = self.h_meta = self.h_users = self.h_ingest = None
         gc.collect()
 
     def __enter__(self):
